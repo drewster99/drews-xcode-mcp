@@ -23,7 +23,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "mcp[cli]>=1.7.0",
+    # mcp 2.0.0 removed mcp.server.fastmcp; stay on 1.x until we migrate to the v2 API.
+    "mcp[cli]>=1.7.0,<2.0.0",
     "questionary>=2.0.0",
     "rich>=13.0.0",
 ]

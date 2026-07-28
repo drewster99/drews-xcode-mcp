@@ -1,5 +1,5 @@
 #!/bin/sh
-cd /Users/andrew/cursor/xcode-mcp-server
+cd /Users/andrew/cursor/drews-xcode-mcp
 if [ -x /opt/miniconda3/bin/python ]; then
     PYTHON=/opt/miniconda3/bin/python
 elif [ -x /opt/homebrew/Caskroom/miniconda/base/envs/xcode-mcp-dev/bin/python ]; then

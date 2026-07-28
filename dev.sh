@@ -22,8 +22,9 @@ source "$SCRIPT_DIR/_venv-setup.sh"
 echo ""
 
 echo "📥 Installing development dependencies..."
+# -e . brings in mcp[cli] with the version cap from pyproject.toml; do not
+# install mcp separately here or an unpinned resolve could pull in mcp 2.x.
 pip install -q -e .
-pip install -q mcp
 echo ""
 
 # Check if npx is available (comes with Node.js)
