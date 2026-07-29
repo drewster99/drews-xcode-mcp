@@ -2,9 +2,9 @@
 
 Whether this server should stop being a per-client `uvx` process and become a thin
 stdio bridge to a single signed LaunchAgent. The architecture was built and measured
-end-to-end in a separate proof of concept (`~/cursor/addertest-xpc-mcp`); this
-records what that proved, what it did **not** prove, and what adopting it here would
-actually cost.
+end-to-end in a separate proof of concept — the `addertest-xpc-mcp` package on PyPI,
+working copy at `~/cursor/addertest-xpc-mcp`. This records what that proved, what it
+did **not** prove, and what adopting it here would actually cost.
 
 > Measured 2026-07-24 → 2026-07-28 on macOS 26.5.2 (build 25F84), against
 > `addertest-xpc-mcp` 0.1.1 (2), signed Developer ID `P8MA38JTXY` and notarized.
@@ -22,16 +22,16 @@ Two properties this server cannot have today, both consequences of being a
 process*, which for a `uvx` server is whichever MCP client launched it. Visible right
 now in the system TCC database:
 
-| `kTCCServiceScreenCapture` client | Value |
-|---|---|
-| `com.apple.Terminal` | 2 (granted) |
-| `com.google.Chrome` | 2 |
-| `com.microsoft.teams2` | 2 |
-| `com.nuclearcyborg.maccontrol` | 2 |
+| `kTCCServiceScreenCapture` client | Value | What it is |
+|---|---|---|
+| `com.apple.Terminal` | 2 (granted) | A *host application*, not our server |
+| `com.nuclearcyborg.maccontrol` | 2 (granted) | An app bundle holding its own grant |
 
 Screenshots work from a Claude Code session in Terminal because *Terminal* holds
-Screen Recording. Run the same server from Cursor, VS Code, or a second client and
-that client must be granted separately. Every client, every permission, again.
+Screen Recording — the grant is the terminal's, and we are borrowing it. Run the same
+server from Cursor, VS Code, or a second client and that client must be granted
+separately. Every client, every permission, again. The second row is the shape we
+want: a signed bundle holding the grant in its own right.
 
 **Every client is its own actor.** N clients means N server processes racing over one
 Xcode instance, one simulator set, one build directory. Independent processes cannot
