@@ -132,9 +132,11 @@ def _console_entries_from_session_section(xcresult_path: str) -> list:
     Bundles from earlier Xcode versions carry no consoleSessionRef and return []
     here immediately.
 
-    Only the app's own output is kept. A session also records several hundred
-    LLDB `progress` events (symbol loading and similar); the old console section
-    never included those, and surfacing them would bury the app's output.
+    Of the LLDB session events, only `progress` is dropped — symbol-loading
+    chatter that the old console section never carried and that would bury the
+    app's own output (20,954 of 20,956 observed locally). Other debugger events
+    are kept: they are rare and carry real diagnostics, such as "empty dSYM file
+    detected, dSYM was created with an executable with no debug info".
     """
     root = _get_xcresult_object(xcresult_path)
     if not root:
@@ -181,6 +183,18 @@ def _console_entries_from_session_section(xcresult_path: str) -> list:
                 line = line.strip()
                 if line:
                     entries.append({'kind': 'output', 'content': line})
+
+        elif 'debugger' in content:
+            event = (content.get('debugger') or {}).get('event')
+            if not isinstance(event, dict) or event.get('kind') == 'progress':
+                continue
+            message = (event.get('message') or '').strip()
+            if not message:
+                continue
+            # The event's own kind ("warning", "error", ...) is carried through
+            # so the formatter classifies severity the same way it does for
+            # OSLog entries.
+            entries.append({'kind': event.get('kind') or 'unknown', 'content': message})
 
     for index, entry in enumerate(entries, start=1):
         entry['line'] = index

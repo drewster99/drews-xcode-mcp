@@ -99,6 +99,15 @@ ACTION_NOT_FOUND = SchemeActionReport(
 # succeeded or has not finished, so its log is neither needed nor complete
 # enough to draw a conclusion from. Every other status — including UNKNOWN —
 # gets its log examined, so an unreadable status still detects a failed build.
+#
+# Note the deliberate asymmetry with SchemeActionStatus.indicates_failure, which
+# excludes CANCELLED. That property answers "should this run be reported as
+# failed", where a stop we asked for is not a failure. This set answers "could a
+# build failure be hiding here", and the answer for a cancelled action is yes:
+# which status Xcode assigns a run whose build fails has not been observed
+# directly, so cancelled is examined rather than assumed innocent. A cancelled
+# action whose build genuinely succeeded has no build errors in its log and is
+# cleared on the evidence.
 _STATUSES_NEEDING_NO_EXPLANATION = frozenset({
     SchemeActionStatus.SUCCEEDED,
     SchemeActionStatus.RUNNING,
