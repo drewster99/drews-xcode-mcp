@@ -24,7 +24,9 @@ classifiers = [
 ]
 dependencies = [
     # mcp 2.0.0 removed mcp.server.fastmcp; stay on 1.x until we migrate to the v2 API.
-    "mcp[cli]>=1.7.0,<2.0.0",
+    # Floored at 1.29.0 deliberately: that is the 1.x release we develop and test
+    # against, so users get the same SDK behavior we see.
+    "mcp[cli]>=1.29.0,<2.0.0",
     "questionary>=2.0.0",
     "rich>=13.0.0",
 ]
