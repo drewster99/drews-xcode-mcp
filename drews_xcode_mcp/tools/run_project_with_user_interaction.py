@@ -24,6 +24,14 @@ from drews_xcode_mcp.utils.applescript import (
     show_error_notification,
     show_persistent_alert,
 )
+from drews_xcode_mcp.utils.scheme_action import (
+    ACTION_NOT_FOUND,
+    SchemeActionReport,
+    annotate_with_action_status,
+    build_action_result_report_applescript,
+    describe_build_failure,
+    parse_action_result_report,
+)
 from drews_xcode_mcp.utils.xcresult import (
     snapshot_xcresult_mtimes,
     wait_for_xcresult_after_timestamp,
@@ -140,6 +148,8 @@ def run_project_with_user_interaction(project_path: str,
     end tell
     '''
 
+    # The outcome report is pinned to the same action as the completion check, so
+    # the status we read always describes the action whose completion we observed.
     if action_id:
         escaped_action_id = escape_applescript_string(action_id)
         check_script = build_action_completed_check_applescript(escaped_path, escaped_action_id)
@@ -153,9 +163,21 @@ def run_project_with_user_interaction(project_path: str,
         if not probe_ok or probe.strip().lower() == "notfound":
             print(f"Warning: run action id not usable (probe_ok={probe_ok}, probe={probe!r}); falling back to last-action check", file=sys.stderr)
             check_script = fallback_check_script
+            report_script = build_action_result_report_applescript(escaped_path)
+        else:
+            report_script = build_action_result_report_applescript(escaped_path, escaped_action_id)
     else:
         print("Warning: could not capture run action id; falling back to last-action check", file=sys.stderr)
         check_script = fallback_check_script
+        report_script = build_action_result_report_applescript(escaped_path)
+
+    def read_action_report() -> SchemeActionReport:
+        """Read this run action's status, error message and build log."""
+        report_ok, report_output = run_applescript(report_script)
+        if not report_ok:
+            print(f"Warning: could not read run action result: {report_output}", file=sys.stderr)
+            return ACTION_NOT_FOUND
+        return parse_action_result_report(report_output)
 
     print(f"App launched, waiting for it to settle (up to {LAUNCH_SETTLE_TIMEOUT}s)...", file=sys.stderr)
 
@@ -164,14 +186,25 @@ def run_project_with_user_interaction(project_path: str,
     # still running when the window expires, we proceed to show the alert.
     settle_elapsed = 0.0
     app_terminated = False
+    action_report = ACTION_NOT_FOUND
     while settle_elapsed < LAUNCH_SETTLE_TIMEOUT:
         success, completed_str = run_applescript(check_script)
         if success and completed_str.strip().lower() == "true":
-            print(f"App terminated during launch settle window (likely crashed at launch)", file=sys.stderr)
+            print(f"Run action completed during launch settle window", file=sys.stderr)
             app_terminated = True
+            action_report = read_action_report()
             break
         time.sleep(0.5)
         settle_elapsed += 0.5
+
+    # `run` in Xcode is build-and-run, so a failed build ends the action without
+    # ever launching the app. Detect that before showing an alert that would
+    # invite the user to interact with an app that isn't there.
+    build_failure = describe_build_failure(action_report, max_lines=max_lines)
+    if build_failure is not None:
+        print("Build failed; app was never launched.", file=sys.stderr)
+        show_error_notification("Build failed - app did not launch", project_name)
+        return build_failure
 
     user_clicked_finish = False
     alert_process = None
@@ -211,8 +244,9 @@ def run_project_with_user_interaction(project_path: str,
 
             success, completed_str = run_applescript(check_script)
             if success and completed_str.strip().lower() == "true":
-                print(f"App terminated naturally", file=sys.stderr)
+                print(f"Run action completed while alert was showing", file=sys.stderr)
                 app_terminated = True
+                action_report = read_action_report()
                 try:
                     alert_process.terminate()
                     # Reap the terminated osascript so it doesn't linger as a
@@ -264,6 +298,17 @@ def run_project_with_user_interaction(project_path: str,
                 break
             time.sleep(2)
 
+        action_report = read_action_report()
+
+    # A build that fails only after the alert has gone up reaches this point with
+    # the alert already dismissed, so re-check before treating the run as one
+    # that produced runtime logs.
+    build_failure = describe_build_failure(action_report, max_lines=max_lines)
+    if build_failure is not None:
+        print("Build failed; app was never launched.", file=sys.stderr)
+        show_error_notification("Build failed - app did not launch", project_name)
+        return build_failure
+
     # Wait for xcresult to finalize
     print(f"Waiting for runtime logs to become available...", file=sys.stderr)
     time.sleep(2)
@@ -274,7 +319,10 @@ def run_project_with_user_interaction(project_path: str,
 
     if not xcresult_path:
         show_error_notification("Run completed but logs unavailable", "Could not find xcresult")
-        return "Run completed. Could not find xcresult file to extract console logs."
+        return annotate_with_action_status(
+            "Run completed. Could not find xcresult file to extract console logs.",
+            action_report,
+        )
 
     print(f"Using xcresult: {xcresult_path}", file=sys.stderr)
 
@@ -283,11 +331,13 @@ def run_project_with_user_interaction(project_path: str,
 
     if not success:
         show_error_notification("Failed to extract logs", console_output)
-        return f"Run completed. {console_output}"
+        return annotate_with_action_status(f"Run completed. {console_output}", action_report)
 
     if not console_output:
         show_result_notification(f"Run completed")
-        return "Run completed. No console output found (or filtered out)."
+        return annotate_with_action_status(
+            "Run completed. No console output found (or filtered out).", action_report
+        )
 
     # Show result notification with error count
     import json
@@ -302,4 +352,4 @@ def run_project_with_user_interaction(project_path: str,
     except json.JSONDecodeError:
         show_result_notification(f"Run completed")
 
-    return console_output
+    return annotate_with_action_status(console_output, action_report)

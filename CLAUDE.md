@@ -202,12 +202,14 @@ hatch version major  # Increment major version
 - **`find_xcresult_bundle()`**: Locates the most recent .xcresult bundle for a project (test logs)
 - **`validate_and_normalize_project_path()`**: Ensures paths are absolute, exist, and are allowed by security policy
 - **`escape_applescript_string()`**: Properly escapes strings for safe AppleScript execution
+- **`utils/scheme_action.py`**: Reads and interprets Xcode scheme action results. `SchemeActionStatus` mirrors Xcode's `scheme action result status` enumeration; `build_action_result_report_applescript()` / `build_action_result_report_tail_applescript()` emit the status + error message + build log in one round trip; `parse_action_result_report()` parses it; `describe_build_failure()` decides whether a *run* action's failure was a build failure; `report_build_failure()` formats a known-failed *build* action
 
 ### Operational Behavior
 - **Scheme Selection**: When no scheme is specified in `build_project`, the active scheme is used automatically
 - **Debug Output**: Server prints debug information to stderr for troubleshooting
 - **Workspace Loading**: All operations wait for Xcode workspace to fully load before proceeding (60-second timeout)
 - **Build Log Filtering**: Build failures return structured JSON with errors/warnings (up to 25 lines) and full log path
+- **Run Outcome Detection**: `run` in Xcode means build-and-run, so a run whose build fails still reports `completed`. All three run tools therefore read `status of <scheme action result>`, never `completed` alone. `run_project_with_user_interaction` and `run_project_until_terminated` inspect the action's build log after it completes and return build errors instead of runtime logs when the build failed; `run_project_unmonitored` returns before the app exits and so can never observe its run action's outcome, so it builds explicitly first and only dispatches `run` if that build succeeded. A failure the build log cannot explain (app crashed, nonzero exit) keeps the runtime logs and attaches a `scheme_action` block to the JSON rather than discarding them
 - **Test Result Filtering**: Test results return structured JSON with summary and only failed test details; passing tests are counted but not detailed
 - **Warning Control**: Global `BUILD_WARNINGS_ENABLED` and `BUILD_WARNINGS_FORCED` flags control warning display; can be overridden per-tool with `include_warnings` parameter
 - **Notifications**: Optional macOS notifications via `osascript` (controlled by `NOTIFICATIONS_ENABLED` global flag)

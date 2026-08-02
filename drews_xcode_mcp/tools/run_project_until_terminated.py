@@ -24,11 +24,24 @@ from drews_xcode_mcp.utils.applescript import (
     show_error_notification,
     show_warning_notification,
 )
+from drews_xcode_mcp.utils.scheme_action import (
+    annotate_with_action_status,
+    build_action_result_report_tail_applescript,
+    describe_build_failure,
+    parse_action_result_report,
+)
 from drews_xcode_mcp.utils.xcresult import (
     snapshot_xcresult_mtimes,
     wait_for_xcresult_after_timestamp,
     extract_console_logs_from_xcresult
 )
+
+# Marks the first line of the AppleScript payload, which reports whether this
+# tool's own timeout fired. The scheme action result cannot express that: a
+# forced stop looks the same to Xcode whether we asked for it after a timeout or
+# because the user was done.
+_OUTCOME_PREFIX = "OUTCOME:"
+_OUTCOME_TIMEOUT = "timeout"
 
 
 @mcp.tool(annotations=TOOL_BUILD)
@@ -117,9 +130,16 @@ def run_project_until_terminated(project_path: str,
         + '            if ((current date) - stopStartDate) >= 20 then exit repeat\n'
         + '            delay 1.0\n'
         + '        end repeat\n'
-        + '        return "timeout"\n'
+        + f'        set outcomeText to "{_OUTCOME_TIMEOUT}"\n'
+        + '    else\n'
+        + '        set outcomeText to "terminated"\n'
         + '    end if\n'
-        + '    return "terminated"\n'
+        # Report the action's real outcome alongside our own. `completed` above
+        # goes true for a failed build just as it does for an app that ran and
+        # exited, so `status` is what tells the two apart.
+        + build_action_result_report_tail_applescript(
+            "actionResult", leading_line_expression=f'"{_OUTCOME_PREFIX}" & outcomeText'
+        )
         + 'end tell\n'
     )
 
@@ -162,7 +182,19 @@ def run_project_until_terminated(project_path: str,
         show_error_notification("Failed to launch app", project_name)
         raise XCodeMCPError(f"Launch failed: {output}")
 
-    if output.strip() == "timeout":
+    outcome_line, _, report_text = output.partition("\n")
+    did_timeout = outcome_line.strip() == f"{_OUTCOME_PREFIX}{_OUTCOME_TIMEOUT}"
+    action_report = parse_action_result_report(report_text)
+
+    # `run` in Xcode is build-and-run, so a failed build ends the action without
+    # ever launching the app — no runtime logs will exist to collect.
+    build_failure = describe_build_failure(action_report, max_lines=max_lines)
+    if build_failure is not None:
+        print("Build failed; app was never launched.", file=sys.stderr)
+        show_error_notification("Build failed - app did not launch", project_name)
+        return build_failure
+
+    if did_timeout:
         duration = format_timeout_duration(effective_timeout)
         print(f"App did not terminate within {duration}; force-stopped.", file=sys.stderr)
         show_warning_notification(f"App timeout ({duration})", "Force-stopped app")
@@ -179,7 +211,10 @@ def run_project_until_terminated(project_path: str,
 
     if not xcresult_path:
         show_error_notification("Run completed but logs unavailable", "Could not find xcresult")
-        return "Run completed. Could not find xcresult file to extract console logs."
+        return annotate_with_action_status(
+            "Run completed. Could not find xcresult file to extract console logs.",
+            action_report,
+        )
 
     print(f"Using xcresult: {xcresult_path}", file=sys.stderr)
 
@@ -188,11 +223,13 @@ def run_project_until_terminated(project_path: str,
 
     if not success:
         show_error_notification("Failed to extract logs", console_output)
-        return f"Run completed. {console_output}"
+        return annotate_with_action_status(f"Run completed. {console_output}", action_report)
 
     if not console_output:
         show_result_notification(f"Run completed")
-        return "Run completed. No console output found (or filtered out)."
+        return annotate_with_action_status(
+            "Run completed. No console output found (or filtered out).", action_report
+        )
 
     # Show result notification with error count
     import json
@@ -207,4 +244,4 @@ def run_project_until_terminated(project_path: str,
     except json.JSONDecodeError:
         show_result_notification(f"Run completed")
 
-    return console_output
+    return annotate_with_action_status(console_output, action_report)

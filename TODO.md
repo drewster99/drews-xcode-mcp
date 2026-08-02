@@ -14,6 +14,9 @@
 - [ ] Support test filtering by class/method in `run_project_tests`
 - [ ] Add timeout configuration for build and test operations
 - [ ] Implement parallel test execution support
+- [ ] Allow fetching the build log of an **in-flight** scheme action, so a build
+      still in progress can be inspected without waiting for it to finish (see
+      "In-Flight Build Log Retrieval" below)
 
 ### Project Creation
 - [ ] Make `create_project` toolchain-aware instead of emitting a format frozen in source (see "Project Template Generation — Toolchain Awareness" below)
@@ -216,6 +219,50 @@ mcp_server.ALLOWED_FOLDERS = {str(self.working_dir)}
 - Group errors by file
 - Extract fix-it suggestions
 
+### In-Flight Build Log Retrieval
+
+**Idea**: expose the `build log` of a scheme action that has *not* finished, so a
+long build can be watched or diagnosed while it runs (progress, which target is
+compiling, first error as soon as it appears) instead of only after completion.
+
+**It works today, and is deliberately unused.** `build log of <scheme action
+result>` is readable while `status` is `running` — verified against a live Xcode
+build in progress, which returned 347,344 characters of partially-written log.
+So this needs no new Xcode capability, only a tool to surface it.
+
+**Why the current code skips it.** `utils/scheme_action.py` fetches the build log
+only for statuses in need of explanation — everything except `succeeded`,
+`running`, and `not yet started` (see `_STATUSES_NEEDING_NO_EXPLANATION` and the
+AppleScript guard it generates). Two reasons, both about *this* use of the log
+rather than the log itself:
+
+1. **Correctness.** That code decides whether a build failed. A partial log can
+   contain errors for files already processed while the build is still going,
+   so a verdict drawn from it would be premature.
+2. **Cost.** The log is large and crosses an `osascript` boundary. Fetching
+   hundreds of KB on every successful run to answer a question the status
+   already settles is pure waste.
+
+Neither objection applies to a tool whose *purpose* is showing in-progress
+output — there the partial log is the point.
+
+**Where `running` shows up in the existing tools** (relevant if this is built):
+- `run_project_until_terminated` — the timeout path issues `stop workspaceDoc`
+  then waits up to 20s; an app that ignores the stop leaves the action `running`
+  when the report is read.
+- `run_project_with_user_interaction` — the same 20s give-up in force-stop
+  verification, plus the `last scheme action result` fallback, which can point at
+  a different, concurrently running action.
+
+**Design sketch**:
+- A `get_build_progress` (or similar) tool taking a project path, returning the
+  current status plus a tail of the in-flight log, with `max_lines` to bound the
+  payload rather than shipping the whole thing.
+- Tail it AppleScript-side if possible — pulling 300KB+ across `osascript` just
+  to discard all but the last 50 lines is the cost problem above, restated.
+- Reuse `build_action_result_report_applescript` for the lookup-by-id path so
+  progress is reported for a specific action rather than whatever ran last.
+
 ### Runtime Output Structure
 
 **Current format**: JSON with intelligent filtering
@@ -268,9 +315,19 @@ xcrun xcresulttool get --path <xcresult> --format json
 
 1. **Workspace loading**: Must wait for `loaded of workspaceDoc is true`
 2. **String escaping**: Backslashes and quotes must be escaped
-3. **Build/test results**: Check `completed of buildResult is true` in loop
-4. **Project paths**: Remove trailing slashes, use absolute paths
-5. **Timeout handling**: AppleScript operations can hang, need subprocess timeouts
+3. **Build/test results**: Poll `completed of buildResult is true` to know the
+   action is *over* — but `completed` says nothing about whether it *worked*. It
+   goes true for every terminal outcome, success and failure alike. Read
+   `status of buildResult` for the outcome. This matters most for `run`, which
+   in Xcode means build-and-run: a run whose build fails still completes, so
+   polling `completed` alone reports a failed build as a successful run. See
+   `utils/scheme_action.py`.
+4. **`error message` is usually `missing value`**: Xcode populates it only when
+   `status` is `error occurred`. Coercing it with `as string` yields the literal
+   text `"missing value"` rather than raising, so callers must treat that string
+   as "absent".
+5. **Project paths**: Remove trailing slashes, use absolute paths
+6. **Timeout handling**: AppleScript operations can hang, need subprocess timeouts
 
 ### Security Model
 
