@@ -49,6 +49,172 @@ def freeze_build_warnings_settings():
     _BUILD_WARNINGS_LOCKED = True
 
 
+# OSLog message types (OSLogType) as they appear in a ConsoleSessionSection's
+# log entries. The older ConsoleLogSection pre-classified severity into its
+# `kind` field; the session format exposes the raw numeric type instead, so it
+# has to be mapped back onto the kinds _format_structured_logs classifies by.
+_OS_LOG_TYPE_TO_KIND = {
+    '0': 'osLog',   # default
+    '1': 'osLog',   # info
+    '2': 'osLog',   # debug
+    '16': 'error',
+    '17': 'fault',
+}
+
+
+def _unwrap_xcresult_object(node):
+    """
+    Collapse xcresulttool's typed JSON into plain Python values.
+
+    The legacy object API wraps every value as {"_type": ..., "_value": ...} and
+    every array as {"_type": ..., "_values": [...]}. Stripping that up front lets
+    the rest of the code read the structure like ordinary JSON.
+    """
+    if isinstance(node, dict):
+        if '_value' in node:
+            return node['_value']
+        if '_values' in node:
+            return [_unwrap_xcresult_object(value) for value in node['_values']]
+        return {key: _unwrap_xcresult_object(value)
+                for key, value in node.items() if key != '_type'}
+    if isinstance(node, list):
+        return [_unwrap_xcresult_object(value) for value in node]
+    return node
+
+
+def _get_xcresult_object(xcresult_path: str, object_id: Optional[str] = None) -> Optional[dict]:
+    """
+    Read one object out of a result bundle, or None if it cannot be read.
+
+    Uses `xcresulttool get object --legacy`, which Apple has marked deprecated.
+    It is the only route to a bundle's ConsoleSessionSection today — the
+    supported `get log --type console` command does not surface it (see
+    _console_entries_from_session_section) — so the deprecation is accepted
+    knowingly rather than overlooked.
+
+    Args:
+        xcresult_path: Path to the .xcresult bundle.
+        object_id: Id of the object to read. When omitted, reads the bundle's
+            root ActionsInvocationRecord.
+    """
+    command = ['xcrun', 'xcresulttool', 'get', 'object', '--legacy',
+               '--path', xcresult_path, '--format', 'json']
+    if object_id:
+        command += ['--id', object_id]
+
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"Warning: could not read xcresult object: {e}", file=sys.stderr)
+        return None
+
+    if result.returncode != 0:
+        print(f"Warning: could not read xcresult object: {result.stderr.strip()[:200]}",
+              file=sys.stderr)
+        return None
+
+    try:
+        return _unwrap_xcresult_object(json.loads(result.stdout))
+    except json.JSONDecodeError as e:
+        print(f"Warning: could not parse xcresult object: {e}", file=sys.stderr)
+        return None
+
+
+def _console_entries_from_session_section(xcresult_path: str) -> list:
+    """
+    Read console output from a bundle's ConsoleSessionSection, returning [] when
+    the bundle has none.
+
+    Xcode 27 moved runtime console output into a new ConsoleSessionSection and
+    left the ConsoleLogSection that `get log --type console` reads as an empty
+    stub — so that command succeeds and reports nothing rather than failing,
+    which is why a run under Xcode 27 appeared to produce no output at all.
+    Bundles from earlier Xcode versions carry no consoleSessionRef and return []
+    here immediately.
+
+    Only the app's own output is kept. A session also records several hundred
+    LLDB `progress` events (symbol loading and similar); the old console section
+    never included those, and surfacing them would bury the app's output.
+    """
+    root = _get_xcresult_object(xcresult_path)
+    if not root:
+        return []
+
+    session_ref = None
+    for action in root.get('actions') or []:
+        reference = (action.get('actionResult') or {}).get('consoleSessionRef')
+        if isinstance(reference, dict) and reference.get('id'):
+            session_ref = reference['id']
+            break
+
+    if not session_ref:
+        return []
+
+    section = _get_xcresult_object(xcresult_path, session_ref)
+    if not section:
+        return []
+
+    entries = []
+    for item in section.get('items') or []:
+        content = (item.get('groupIO') or {}).get('endpointIO', {}).get('content', {})
+
+        if 'log' in content:
+            log = content.get('log') or {}
+            message = (log.get('message') or '').strip()
+            if not message:
+                continue
+            entry = {
+                'kind': _OS_LOG_TYPE_TO_KIND.get(str(log.get('messageType')), 'osLog'),
+                'content': message,
+            }
+            if log.get('subsystem'):
+                entry['subsystem'] = log['subsystem']
+            if log.get('category'):
+                entry['category'] = log['category']
+            entries.append(entry)
+
+        elif 'data' in content:
+            # Raw stdout/stderr. A single chunk can carry many lines, so split it
+            # — the formatter treats one entry as one line for context and
+            # regex matching.
+            for line in (content.get('data') or '').splitlines():
+                line = line.strip()
+                if line:
+                    entries.append({'kind': 'output', 'content': line})
+
+    for index, entry in enumerate(entries, start=1):
+        entry['line'] = index
+
+    if entries:
+        print(f"Read {len(entries)} console entries from ConsoleSessionSection", file=sys.stderr)
+    return entries
+
+
+def _console_entries_from_legacy_log(log_data: dict) -> list:
+    """Normalize the items returned by `get log --type console` into console entries."""
+    entries = []
+    for idx, item in enumerate(log_data.get('items', []), start=1):
+        content = item.get('content', '').strip()
+        if not content:
+            continue
+
+        entry = {
+            'line': idx,
+            'kind': item.get('kind', 'unknown'),
+            'content': content,
+        }
+
+        log_data_obj = item.get('logData', {})
+        if log_data_obj:
+            if log_data_obj.get('subsystem'):
+                entry['subsystem'] = log_data_obj['subsystem']
+            if log_data_obj.get('category'):
+                entry['category'] = log_data_obj['category']
+
+        entries.append(entry)
+    return entries
+
+
 def extract_console_logs_from_xcresult(xcresult_path: str,
                                       regex_filter: Optional[str] = None,
                                       max_lines: int = 20) -> Tuple[bool, str]:
@@ -105,28 +271,18 @@ def extract_console_logs_from_xcresult(xcresult_path: str,
         log_data = json.loads(result.stdout)
 
         # Extract ALL log entries (no filtering at this stage)
-        all_logs = []
-        for idx, item in enumerate(log_data.get('items', []), start=1):
-            content = item.get('content', '').strip()
-            if not content:
-                continue
+        all_logs = _console_entries_from_legacy_log(log_data)
 
-            # Extract structured fields
-            log_entry = {
-                'line': idx,
-                'kind': item.get('kind', 'unknown'),
-                'content': content
-            }
-
-            # Add optional fields if present
-            log_data_obj = item.get('logData', {})
-            if log_data_obj:
-                if 'subsystem' in log_data_obj and log_data_obj['subsystem']:
-                    log_entry['subsystem'] = log_data_obj['subsystem']
-                if 'category' in log_data_obj and log_data_obj['category']:
-                    log_entry['category'] = log_data_obj['category']
-
-            all_logs.append(log_entry)
+        # The supported command above reads the bundle's ConsoleLogSection,
+        # which Xcode 27 leaves as an empty stub after moving console output to
+        # a ConsoleSessionSection. It reports success with nothing in it, so an
+        # empty result is the signal to look for a session section. Checking it
+        # only when nothing was found keeps the supported path primary — if a
+        # later Xcode populates ConsoleLogSection again, this stops being used
+        # without a code change — and costs an extra lookup only on runs that
+        # produced no output.
+        if not all_logs:
+            all_logs = _console_entries_from_session_section(xcresult_path)
 
         if not all_logs:
             return True, json.dumps({"summary": {"total_lines": 0}, "full_log_path": None})

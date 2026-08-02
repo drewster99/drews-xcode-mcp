@@ -219,6 +219,50 @@ mcp_server.ALLOWED_FOLDERS = {str(self.working_dir)}
 - Group errors by file
 - Extract fix-it suggestions
 
+### Console Output Moved in Xcode 27 (ConsoleSessionSection)
+
+**Symptom**: runs under Xcode 27 beta returned no runtime output at all, while
+the same project under Xcode 26.6 returned it normally.
+
+**Cause**: Xcode 27 writes result bundles at legacy format version **3.60** and
+moved runtime console output into a new `ConsoleSessionSection`. The
+`ConsoleLogSection` that `xcresulttool get log --type console` reads is left as a
+~117-byte stub. That command still *succeeds* and returns `{"items": []}`, so
+nothing looked like an error — the output was simply gone.
+
+Evidence from one AgentSmith project, two runs minutes apart:
+
+| bundle format | Xcode | `ConsoleLogSection` | `ConsoleSessionSection` | `--type console` |
+|---|---|---|---|---|
+| 3.58 | 26.6 release | 45,087 B | *absent* | 45 items |
+| 3.60 | 27 beta | 117 B (stub) | 325,728 B | 0 items |
+
+Across all 16 local Launch bundles the split was exact: every 3.60 bundle
+returned 0 items from the supported command; only 3.58 bundles returned any.
+
+**Current handling** (`utils/xcresult.py`): when `get log --type console` yields
+nothing, look for a `consoleSessionRef` on the action result and read that
+section via `xcresulttool get object --legacy`. Bundles from older Xcode have no
+such ref and cost one extra lookup only on runs that genuinely produced no
+output. Within a session, `log` entries map back onto the old `kind` values via
+`OSLogType` (16 → error, 17 → fault), `data` entries are raw stdout/stderr split
+into lines, and LLDB `progress` events are dropped — a single run carried 324 of
+them, and the old console section never included them.
+
+**Why this needs revisiting**:
+- `get object --legacy` is explicitly deprecated ("will be removed in a future
+  release"). It is currently the only route to `ConsoleSessionSection`.
+- This may simply be a beta bug. The supported command is still tried first, so
+  if a later Xcode populates `ConsoleLogSection` again, the deprecated path stops
+  being reached with no code change — but that should be confirmed and the
+  fallback removed once it is.
+- Watch for a supported replacement (a `--type` value that exposes the session,
+  or a non-legacy object API). Prefer it as soon as one exists.
+- The session format carries richer per-entry data than the old one (`pid`,
+  `tid`, `senderWallTime`, `senderImageName`, `processSessionUUID`). Only
+  message/subsystem/category are used today; timestamps in particular could
+  improve the runtime output.
+
 ### In-Flight Build Log Retrieval
 
 **Idea**: expose the `build log` of a scheme action that has *not* finished, so a
