@@ -8,6 +8,12 @@
 - [ ] Add `get_available_destinations` tool to query run destinations
 - [ ] Create mock-based test suite that doesn't trigger Xcode UI alerts
 - [ ] Fix test projects not being found immediately after creation (Spotlight indexing delay)
+- [ ] Recover file/line for test failures. `get test-results tests` emits failures
+      as `Failure Message` child nodes carrying only the message text, so
+      `failed_tests[].failures[]` has no `file`/`line` (the documented shape
+      allows them, and the older `failureMessages` key did supply them). Check
+      whether `get test-results test-details` or the node's `nodeIdentifierURL`
+      can supply the location.
 
 ### Build & Run Enhancements
 - [ ] Add destination parameter to `run_project_tests` for specific device/simulator targeting

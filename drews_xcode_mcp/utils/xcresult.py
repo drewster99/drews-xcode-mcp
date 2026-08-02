@@ -1085,6 +1085,22 @@ def extract_test_results_from_xcresult(xcresult_path: str) -> Tuple[bool, str]:
 
                         failures.append(failure_info)
 
+                # `get test-results tests` does not put failures on the test
+                # case as a key — it emits them as child nodes of type
+                # "Failure Message", carrying the text in `name`. Reading only
+                # the key above meant every failed test reported "no failure
+                # message available", losing the one detail that explains the
+                # failure. The key is still honored first in case a version
+                # emits it, since only that form carries file/line.
+                seen_messages = {f.get('message') for f in failures}
+                for child in node.get('children') or []:
+                    if child.get('nodeType') != 'Failure Message':
+                        continue
+                    message = (child.get('name') or '').strip()
+                    if message and message not in seen_messages:
+                        seen_messages.add(message)
+                        failures.append({'message': message})
+
                 test_info['failures'] = failures
 
             test_cases.append(test_info)
