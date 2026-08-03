@@ -14,6 +14,9 @@
       allows them, and the older `failureMessages` key did supply them). Check
       whether `get test-results test-details` or the node's `nodeIdentifierURL`
       can supply the location.
+- [ ] Add a test-target fixture to `test_projects/templates/`, so the test tools
+      can be exercised end to end at all (see "No Test Fixture for the Test
+      Tools" below)
 
 ### Build & Run Enhancements
 - [ ] Add destination parameter to `run_project_tests` for specific device/simulator targeting
@@ -224,6 +227,36 @@ mcp_server.ALLOWED_FOLDERS = {str(self.working_dir)}
 - Better parsing of Swift vs Objective-C errors
 - Group errors by file
 - Extract fix-it suggestions
+
+### No Test Fixture for the Test Tools
+
+**Gap**: not one of the five projects in `test_projects/templates/` (BrokenApp,
+ConsoleApp, iOSTestApp, SimpleApp, SwiftUITestApp — the "Test" in the last two
+names refers to their being test *subjects*, not to containing tests) has a unit
+test target. `run_project_tests`, `list_project_tests` and
+`get_latest_test_results` therefore have nothing to run against, and no
+end-to-end test of those tools is possible in this repo today.
+
+**What this left unverified.** The fix for test failure messages always reading
+"Test failed (no failure message available)" was validated against a real
+format-3.60 result bundle, but one produced by `xcodebuild test` on a throwaway
+Swift package rather than by Xcode's own `test` scheme action driven through
+AppleScript. The extraction code is identical for both — it reads the bundle, not
+the thing that wrote it — and the failure-node shape was confirmed in that
+bundle. What is unconfirmed is only whether Xcode's `test` action writes the same
+node shape as `xcodebuild test`.
+
+**What to add**: a small macOS unit-test target with a deliberately failing
+assertion alongside a passing one, so a run exercises both branches. Failing
+deliberately is the point — the pass path was never the broken one. Keep it
+macOS-only so it needs no simulator and no UI focus.
+
+**Then verify** through the MCP path, not just the extractor:
+- `list_project_tests` enumerates the cases
+- `run_project_tests` reports correct pass/fail counts
+- `failed_tests[].failure_message` carries the real assertion text rather than
+  the "no failure message available" placeholder
+- the produced bundle's format version, so it is clear which Xcode wrote it
 
 ### Console Output Moved in Xcode 27 (ConsoleSessionSection)
 
