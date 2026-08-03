@@ -103,11 +103,15 @@ ACTION_NOT_FOUND = SchemeActionReport(
 # Note the deliberate asymmetry with SchemeActionStatus.indicates_failure, which
 # excludes CANCELLED. That property answers "should this run be reported as
 # failed", where a stop we asked for is not a failure. This set answers "could a
-# build failure be hiding here", and the answer for a cancelled action is yes:
-# which status Xcode assigns a run whose build fails has not been observed
-# directly, so cancelled is examined rather than assumed innocent. A cancelled
-# action whose build genuinely succeeded has no build errors in its log and is
-# cleared on the evidence.
+# build failure be hiding here", and CANCELLED is kept in scope for that second
+# question.
+#
+# A run whose build fails has since been observed reporting FAILED (Xcode 27
+# beta 4, run action on a project with a syntax error), so CANCELLED is not the
+# status this detection depends on. It stays in scope anyway because the cost is
+# one build-log read on a path that already ended abnormally, and because a
+# cancelled action whose build genuinely succeeded carries no build errors and is
+# cleared on the evidence rather than by assumption.
 _STATUSES_NEEDING_NO_EXPLANATION = frozenset({
     SchemeActionStatus.SUCCEEDED,
     SchemeActionStatus.RUNNING,
