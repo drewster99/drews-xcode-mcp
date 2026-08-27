@@ -6,6 +6,8 @@ import os
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from drews_xcode_mcp.strict_tool_arguments import enforce_strict_tool_arguments
+
 # Set by the xcode-mcp-server compatibility shim when the server was launched
 # through the legacy package name, so we can surface migration guidance.
 LEGACY_PACKAGE_NAME = os.environ.get("XCODE_MCP_LEGACY_PACKAGE_NAME")
@@ -44,6 +46,10 @@ _INSTRUCTIONS = """
 
 if LEGACY_PACKAGE_NAME:
     _INSTRUCTIONS += LEGACY_MIGRATION_NOTE
+
+# Must precede every @mcp.tool() registration, which happens as the modules in
+# drews_xcode_mcp/tools/ import this one.
+enforce_strict_tool_arguments()
 
 # Initialize the MCP server
 mcp = FastMCP("Xcode MCP Server", instructions=_INSTRUCTIONS)

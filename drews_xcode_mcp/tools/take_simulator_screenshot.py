@@ -4,7 +4,9 @@
 import os
 import sys
 import subprocess
-from typing import Optional
+from typing import Annotated, Optional
+
+from pydantic import Field
 
 from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
@@ -13,22 +15,44 @@ from drews_xcode_mcp.utils.applescript import show_result_notification, show_err
 from drews_xcode_mcp.utils.screenshot import _get_booted_simulators, get_screenshot_path
 
 
+def _describe_booted_simulators(booted_simulators) -> str:
+    """Render booted simulators as one line each, so an error can name the choices."""
+    return "\n".join(
+        f"  • {sim['name']} ({sim['os']}) — {sim['udid']}" for sim in booted_simulators
+    )
+
+
 @mcp.tool(annotations=TOOL_READONLY)
 @apply_config
-def take_simulator_screenshot(udid: Optional[str] = None) -> str:
+def take_simulator_screenshot(
+    udid: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "UDID of the booted simulator to screenshot, exactly as reported by "
+                "`list_booted_simulators` (for example "
+                "'D9A710C8-CEF1-4C5B-8CCA-0CB97DCABE2C'). May be omitted only when a "
+                "single simulator is booted; when several are booted it is required, "
+                "and omitting it is an error rather than a guess."
+            )
+        ),
+    ] = None,
+) -> str:
     """
     Take a screenshot of a booted iOS simulator.
 
     Args:
-        udid: Optional UDID (device identifier) of the simulator to screenshot.
-              If not provided or empty, the first booted simulator found is used.
-              A list of running simulators can be found with `list_booted_simulators`.
+        udid: UDID (device identifier) of the simulator to screenshot, as listed by
+              `list_booted_simulators`. If omitted, the sole booted simulator is used;
+              if more than one is booted, the call fails and lists the candidates
+              rather than picking one.
 
     Returns:
         The file path to the saved screenshot.
 
     Raises:
-        XCodeMCPError: If no booted simulators found or screenshot fails.
+        XCodeMCPError: If no booted simulators found, if `udid` was omitted while
+            several simulators are booted, or if the screenshot fails.
     """
     try:
         target_udid = None
@@ -49,7 +73,6 @@ def take_simulator_screenshot(udid: Optional[str] = None) -> str:
             except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
                 print(f"warn: friendly-name lookup for {target_udid} failed: {e}", file=sys.stderr)
         else:
-            # No UDID specified - find first booted simulator
             booted_simulators = _get_booted_simulators()
 
             if not booted_simulators:
@@ -57,7 +80,17 @@ def take_simulator_screenshot(udid: Optional[str] = None) -> str:
                 show_error_notification(error_msg)
                 raise XCodeMCPError("No booted simulators found")
 
-            # Use first booted simulator
+            # Choosing among several would silently screenshot a device the caller
+            # never named, and the caller cannot tell that from a correct result.
+            if len(booted_simulators) > 1:
+                error_msg = f"{len(booted_simulators)} simulators booted"
+                show_error_notification(error_msg, "udid required")
+                raise XCodeMCPError(
+                    f"{len(booted_simulators)} simulators are booted, so 'udid' is required. "
+                    "Pass the UDID of the one to screenshot:\n"
+                    f"{_describe_booted_simulators(booted_simulators)}"
+                )
+
             target_udid = booted_simulators[0]['udid']
             target_name = booted_simulators[0]['name']
 
