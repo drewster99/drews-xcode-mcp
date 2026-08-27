@@ -9,6 +9,7 @@ import sys
 import subprocess
 import json
 import shutil
+import pathlib
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -73,7 +74,67 @@ class XcodeMCPTestRunner:
         shutil.copytree(template_path, working_path)
         print(f"Copied {project_name} to working directory")
 
+        self.wait_for_spotlight_index(working_path)
+
         return working_path
+
+    def wait_for_spotlight_index(self, project_dir: Path, timeout_seconds: float = 60.0):
+        """
+        Block until Spotlight can find the project bundles just copied into project_dir.
+
+        get_xcode_projects locates projects with `mdfind`, which only sees files
+        Spotlight has indexed. A freshly copied tree is not indexed yet, so a test
+        that copies and immediately searches races the indexer and intermittently
+        reports the project missing. `mdimport` requests an immediate index; the
+        poll confirms it actually landed before any test queries for it.
+
+        Args:
+            project_dir: Directory just populated with a copied template project.
+            timeout_seconds: How long to wait before giving up.
+
+        Raises:
+            TimeoutError: If Spotlight never reports the bundles, so the cause is
+                named rather than surfacing later as a missing-project assertion.
+        """
+        # Only top-level bundles. An .xcodeproj contains its own
+        # project.xcworkspace, which lives inside the bundle and is never indexed
+        # as a separate Spotlight item, so waiting on it would always time out.
+        bundle_suffixes = (".xcodeproj", ".xcworkspace")
+        expected = sorted(
+            path for path in project_dir.rglob("*")
+            if path.suffix in bundle_suffixes
+            and not any(parent.suffix in bundle_suffixes for parent in path.parents)
+        )
+        if not expected:
+            return
+
+        subprocess.run(["mdimport", str(project_dir)], capture_output=True, timeout=60)
+
+        # mdfind reports resolved paths and one result per line. Compare resolved
+        # paths so reaching the repo through a symlink still matches, and split on
+        # lines so a path containing a space stays one result.
+        expected_resolved = {str(path.resolve()) for path in expected}
+
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            found = {
+                str(pathlib.Path(line).resolve())
+                for line in subprocess.run(
+                    ["mdfind", "-onlyin", str(project_dir),
+                     'kMDItemFSName == "*.xcodeproj" || kMDItemFSName == "*.xcworkspace"'],
+                    capture_output=True, text=True, timeout=30,
+                ).stdout.splitlines() if line.strip()
+            }
+            missing = sorted(expected_resolved - found)
+            if not missing:
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Spotlight did not index {[pathlib.Path(m).name for m in missing]} in "
+                    f"{project_dir} within {timeout_seconds:.0f}s. Tests that rely on "
+                    "mdfind cannot run until it does."
+                )
+            time.sleep(0.25)
 
     def run_mcp_tool(self, tool_name: str, **params) -> Dict[str, Any]:
         """
