@@ -5,12 +5,14 @@ import os
 
 from drews_xcode_mcp.server import mcp, TOOL_MUTATING_IDEMPOTENT
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.exceptions import InvalidParameterError, XCodeMCPError
 from drews_xcode_mcp.utils.applescript import escape_applescript_string, run_applescript, show_result_notification, show_error_notification
 
 
 @mcp.tool(annotations=TOOL_MUTATING_IDEMPOTENT)
+@describe_parameters_from_docstring
 @apply_config
 def stop_project(project_path: str) -> str:
     """

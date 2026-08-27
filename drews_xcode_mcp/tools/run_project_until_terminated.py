@@ -10,6 +10,7 @@ from typing import Optional
 
 from drews_xcode_mcp.server import mcp, TOOL_BUILD
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.exceptions import XCodeMCPError, InvalidParameterError
 from drews_xcode_mcp.utils.run_guard import exclusive_per_project
@@ -45,6 +46,7 @@ _OUTCOME_TIMEOUT = "timeout"
 
 
 @mcp.tool(annotations=TOOL_BUILD)
+@describe_parameters_from_docstring
 @apply_config
 @exclusive_per_project
 def run_project_until_terminated(project_path: str,

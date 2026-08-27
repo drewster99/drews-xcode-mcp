@@ -14,7 +14,7 @@ class BasicTests(XcodeMCPTestRunner):
         """Test that version command returns expected format."""
         result = self.run_mcp_tool("version")
         self.assert_success(result)
-        self.assert_contains(result["result"], "Xcode MCP Server version")
+        self.assert_contains(result["result"], "Drew's Xcode MCP Server (drews-xcode-mcp) version")
 
     def test_get_xcode_projects_empty(self):
         """Test finding projects in empty directory."""

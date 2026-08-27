@@ -7,6 +7,7 @@ from typing import Optional
 
 from drews_xcode_mcp.server import mcp, TOOL_BUILD
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.exceptions import InvalidParameterError, XCodeMCPError
 from drews_xcode_mcp.utils.applescript import (
@@ -41,6 +42,7 @@ _LAUNCHED_SENTINEL = "LAUNCHED"
 # has none of the result-isolation the guard exists to protect. Callers are
 # responsible for not launching the same project repeatedly without stopping it.
 @mcp.tool(annotations=TOOL_BUILD)
+@describe_parameters_from_docstring
 @apply_config
 def run_project_unmonitored(project_path: str,
                              scheme: Optional[str] = None,

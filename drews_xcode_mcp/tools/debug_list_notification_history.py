@@ -7,6 +7,7 @@ import sys
 
 from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.utils.applescript import get_notification_history
 from drews_xcode_mcp.utils.paths import DEBUG_DIR
 
@@ -17,6 +18,7 @@ NOTIFICATION_HISTORY_FILE = os.path.join(DEBUG_DIR, "notification-history.txt")
 
 
 @mcp.tool(annotations=TOOL_READONLY)
+@describe_parameters_from_docstring
 @apply_config
 def debug_list_notification_history() -> str:
     """

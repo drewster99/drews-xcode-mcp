@@ -4,6 +4,7 @@ Fixed tests that actually test MCP server functionality properly.
 These tests ensure we're testing real behavior, not just mocking responses.
 """
 
+import re
 import os
 import time
 from pathlib import Path
@@ -19,19 +20,16 @@ class FixedTests(XcodeMCPTestRunner):
 
         # Check format
         version = result["result"]
-        self.assert_contains(version, "Xcode MCP Server version")
+        self.assert_contains(version, "Drew's Xcode MCP Server (drews-xcode-mcp) version")
 
-        # Extract version number and validate format (e.g., "1.0.6")
+        # Extract version number and validate format (e.g., "1.0.6", "1.3.14b1").
+        # A source checkout appends " (dev source <hash>)", so take the first token.
         parts = version.split("version ")
         assert len(parts) == 2, f"Version format unexpected: {version}"
 
-        version_num = parts[1].strip()
-        version_parts = version_num.split(".")
-        assert len(version_parts) >= 2, f"Version number format invalid: {version_num}"
-
-        # Ensure version parts are numeric
-        for part in version_parts:
-            assert part.isdigit(), f"Version part not numeric: {part}"
+        version_num = parts[1].split()[0]
+        assert re.fullmatch(r"\d+\.\d+(\.\d+)?([ab]\d+)?", version_num), \
+            f"Version number format invalid: {version_num}"
 
         print(f"✓ Version format validated: {version_num}")
 

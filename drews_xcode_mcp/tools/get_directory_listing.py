@@ -8,12 +8,14 @@ from typing import Optional
 
 from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_directory_path
 from drews_xcode_mcp.exceptions import AccessDeniedError, InvalidParameterError, XCodeMCPError
 from drews_xcode_mcp.utils.applescript import show_error_notification
 
 
 @mcp.tool(annotations=TOOL_READONLY)
+@describe_parameters_from_docstring
 @apply_config
 def get_directory_listing(directory_path: str,
                          regex_filter: Optional[str] = None,

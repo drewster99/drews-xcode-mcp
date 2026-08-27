@@ -20,7 +20,7 @@ class MinimalTests(XcodeMCPTestRunner):
 
         # Validate format
         version = result["result"]
-        assert "Xcode MCP Server version" in version
+        assert "Drew's Xcode MCP Server (drews-xcode-mcp) version" in version
         assert len(version.split(".")) >= 2  # Should have version number like x.y.z
 
     def test_path_validation_logic(self):

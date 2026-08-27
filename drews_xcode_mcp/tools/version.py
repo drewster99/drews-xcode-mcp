@@ -7,6 +7,7 @@ import os
 from drews_xcode_mcp import __version__
 from drews_xcode_mcp.server import mcp, TOOL_READONLY, LEGACY_PACKAGE_NAME
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.utils.applescript import show_result_notification
 
 
@@ -45,6 +46,7 @@ _DEV_SOURCE_FINGERPRINT = _compute_dev_source_fingerprint()
 
 
 @mcp.tool(annotations=TOOL_READONLY)
+@describe_parameters_from_docstring
 @apply_config
 def version() -> str:
     """

@@ -7,6 +7,7 @@ import sys
 
 from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.utils.applescript import (
     escape_applescript_string,
@@ -19,6 +20,7 @@ from drews_xcode_mcp.utils.xcresult import find_xcresult_bundle, extract_test_re
 
 
 @mcp.tool(annotations=TOOL_READONLY)
+@describe_parameters_from_docstring
 @apply_config
 def get_latest_test_results(project_path: str) -> str:
     """

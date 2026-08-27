@@ -4,12 +4,11 @@
 import os
 import sys
 import subprocess
-from typing import Annotated, Optional
-
-from pydantic import Field
+from typing import Optional
 
 from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.exceptions import XCodeMCPError
 from drews_xcode_mcp.utils.applescript import show_result_notification, show_error_notification
 from drews_xcode_mcp.utils.screenshot import _get_booted_simulators, get_screenshot_path
@@ -23,29 +22,18 @@ def _describe_booted_simulators(booted_simulators) -> str:
 
 
 @mcp.tool(annotations=TOOL_READONLY)
+@describe_parameters_from_docstring
 @apply_config
-def take_simulator_screenshot(
-    udid: Annotated[
-        Optional[str],
-        Field(
-            description=(
-                "UDID of the booted simulator to screenshot, exactly as reported by "
-                "`list_booted_simulators` (for example "
-                "'D9A710C8-CEF1-4C5B-8CCA-0CB97DCABE2C'). May be omitted only when a "
-                "single simulator is booted; when several are booted it is required, "
-                "and omitting it is an error rather than a guess."
-            )
-        ),
-    ] = None,
-) -> str:
+def take_simulator_screenshot(udid: Optional[str] = None) -> str:
     """
     Take a screenshot of a booted iOS simulator.
 
     Args:
-        udid: UDID (device identifier) of the simulator to screenshot, as listed by
-              `list_booted_simulators`. If omitted, the sole booted simulator is used;
-              if more than one is booted, the call fails and lists the candidates
-              rather than picking one.
+        udid: UDID (device identifier) of the simulator to screenshot, exactly as
+              reported by `list_booted_simulators` (for example
+              "D9A710C8-CEF1-4C5B-8CCA-0CB97DCABE2C"). May be omitted only when a
+              single simulator is booted; when several are booted it is required,
+              and the call fails listing the candidates rather than guessing.
 
     Returns:
         The file path to the saved screenshot.

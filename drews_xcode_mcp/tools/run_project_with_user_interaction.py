@@ -11,6 +11,7 @@ from typing import Optional
 
 from drews_xcode_mcp.server import mcp, TOOL_BUILD
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.exceptions import XCodeMCPError, InvalidParameterError
 from drews_xcode_mcp.utils.run_guard import exclusive_per_project
@@ -50,6 +51,7 @@ LAUNCH_SETTLE_TIMEOUT = 10
 
 
 @mcp.tool(annotations=TOOL_BUILD)
+@describe_parameters_from_docstring
 @apply_config
 @exclusive_per_project
 def run_project_with_user_interaction(project_path: str,

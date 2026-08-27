@@ -7,6 +7,7 @@ import subprocess
 
 from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.exceptions import XCodeMCPError
 from drews_xcode_mcp.utils.applescript import (
@@ -19,6 +20,7 @@ from drews_xcode_mcp.utils.screenshot import get_screenshot_path
 
 
 @mcp.tool(annotations=TOOL_READONLY)
+@describe_parameters_from_docstring
 @apply_config
 def take_xcode_screenshot(project_path: str) -> str:
     """

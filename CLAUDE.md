@@ -173,6 +173,37 @@ Custom exception hierarchy:
 - `AccessDeniedError`: Path access violations
 - `InvalidParameterError`: Invalid input parameters
 
+### Tool Argument Contract
+
+Two rules hold for every tool, enforced centrally rather than per-tool. Both
+exist because a caller that gets an argument name wrong must be told, not
+quietly given a default.
+
+**Unknown arguments are rejected.** FastMCP builds each tool's argument model
+from its signature, and pydantic's default `extra="ignore"` silently discards a
+key matching no parameter — so a misspelled optional argument was
+indistinguishable from omitting it, and the tool ran with the parameter's
+default. `strict_tool_arguments.enforce_strict_tool_arguments()` sets
+`extra="forbid"` on `ArgModelBase` and is called from `server.py` before any
+`@mcp.tool()` registration (the tools modules import `server`, so that ordering
+is automatic). Every published schema therefore carries
+`additionalProperties: false`. The function reaches into `mcp` internals, so it
+raises if `ArgModelBase` moves and re-verifies by building a probe model and
+confirming it actually rejects an undeclared key — the protection can never
+lapse silently on an `mcp` or `pydantic` upgrade.
+
+**Parameter descriptions come from the docstring.** The `Args:` block is the
+single source; `docstring_parameters.describe_parameters_from_docstring`
+(applied to every tool, between `@mcp.tool()` and `@apply_config`) parses it and
+attaches `Field(description=...)` so the text reaches the JSON Schema. Without
+it a parameter published only an auto-derived title such as `"Udid"`, leaving
+the machine-readable contract silent about what the argument means. Do NOT
+restate a description in an `Annotated[..., Field(description=...)]` — that
+creates a second copy to drift; write it in the docstring only. An explicit
+`Field(description=...)` is honored and left alone if a tool ever needs to
+override. A parameter absent from the `Args:` block raises at import, so the
+server will not start while a parameter is undocumented.
+
 ## Key Implementation Details
 
 - **Notifications**: Optional macOS notifications for tool invocations (--show-notifications flag)

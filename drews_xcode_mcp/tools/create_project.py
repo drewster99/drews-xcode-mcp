@@ -8,6 +8,7 @@ from typing import Optional
 
 from drews_xcode_mcp.server import mcp, TOOL_CREATE
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_parent_for_new_project
 from drews_xcode_mcp.exceptions import InvalidParameterError
 from drews_xcode_mcp.utils.applescript import (
@@ -42,6 +43,7 @@ _DEPLOYMENT_TARGET_RE = re.compile(r'^\d+(\.\d+){0,2}$')
 
 
 @mcp.tool(annotations=TOOL_CREATE)
+@describe_parameters_from_docstring
 @apply_config
 def create_project(
     parent_directory: str,

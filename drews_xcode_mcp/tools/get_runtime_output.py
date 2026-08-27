@@ -7,6 +7,7 @@ from typing import Optional
 
 from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
+from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.exceptions import InvalidParameterError, XCodeMCPError
 from drews_xcode_mcp.utils.xcresult import find_xcresult_for_project, extract_console_logs_from_xcresult
@@ -14,6 +15,7 @@ from drews_xcode_mcp.utils.applescript import show_error_notification, show_warn
 
 
 @mcp.tool(annotations=TOOL_READONLY)
+@describe_parameters_from_docstring
 @apply_config
 def get_runtime_output(project_path: str,
                       regex_filter: Optional[str] = None,
