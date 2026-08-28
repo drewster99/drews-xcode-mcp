@@ -86,9 +86,16 @@ def escape_applescript_string(s: str) -> str:
     Returns:
         Escaped string safe for AppleScript
     """
-    # Escape backslashes first, then quotes
+    # Escape backslashes first, then quotes.
     s = s.replace("\\", "\\\\")
     s = s.replace('"', '\\"')
+    # Newlines/tabs/returns cannot appear raw inside an AppleScript string
+    # literal: a raw newline in a caller-supplied value (e.g. a scheme name) would
+    # end the statement and inject the remainder as new AppleScript. AppleScript
+    # interprets \n, \r and \t escapes inside literals, so encode them.
+    s = s.replace("\n", "\\n")
+    s = s.replace("\r", "\\r")
+    s = s.replace("\t", "\\t")
     return s
 
 
@@ -257,6 +264,32 @@ def resolve_build_timeout(timeout: Optional[int]) -> int:
             f"({MAX_BUILD_TIMEOUT_SECONDS // 3600} hours)"
         )
     return timeout
+
+
+def validate_max_lines(max_lines: int) -> int:
+    """Validate a `max_lines` tool argument.
+
+    A non-positive value corrupts the error/console formatters: it produces a
+    negative Python slice (returning the wrong lines) and nonsensical
+    `showing_errors: -1` counts. Reject it at the tool boundary, before any Xcode
+    work, rather than letting it silently distort the output.
+
+    Args:
+        max_lines: Caller-supplied maximum number of lines to show.
+
+    Returns:
+        The validated value.
+
+    Raises:
+        InvalidParameterError: If `max_lines` is not a positive integer. bool is a
+            subclass of int and is rejected explicitly so True/False can't slip
+            through as 1/0.
+    """
+    if isinstance(max_lines, bool) or not isinstance(max_lines, int):
+        raise InvalidParameterError("max_lines must be an integer number of lines")
+    if max_lines <= 0:
+        raise InvalidParameterError("max_lines must be a positive number of lines")
+    return max_lines
 
 
 def run_applescript(script: str, timeout: int = DEFAULT_APPLESCRIPT_TIMEOUT) -> Tuple[bool, str]:

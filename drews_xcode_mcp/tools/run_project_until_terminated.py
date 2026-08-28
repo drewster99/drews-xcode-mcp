@@ -24,9 +24,12 @@ from drews_xcode_mcp.utils.applescript import (
     show_result_notification,
     show_error_notification,
     show_warning_notification,
+    validate_max_lines,
 )
 from drews_xcode_mcp.utils.scheme_action import (
+    SchemeActionStatus,
     annotate_with_action_status,
+    attach_run_warning,
     build_action_result_report_tail_applescript,
     describe_build_failure,
     parse_action_result_report,
@@ -42,7 +45,11 @@ from drews_xcode_mcp.utils.xcresult import (
 # forced stop looks the same to Xcode whether we asked for it after a timeout or
 # because the user was done.
 _OUTCOME_PREFIX = "OUTCOME:"
+_OUTCOME_TERMINATED = "terminated"
 _OUTCOME_TIMEOUT = "timeout"
+# Timed out AND the forced stop was not confirmed to complete — the app may still
+# be running, which the plain timeout outcome cannot convey.
+_OUTCOME_TIMEOUT_UNSTOPPED = "timeout-unstopped"
 
 
 @mcp.tool(annotations=TOOL_BUILD)
@@ -92,6 +99,8 @@ def run_project_until_terminated(project_path: str,
         except re.error as e:
             raise InvalidParameterError(f"Invalid regex_filter: {e}")
 
+    max_lines = validate_max_lines(max_lines)
+
     # Show running notification
     project_name = os.path.basename(normalized_path)
     scheme_name = scheme if scheme else "active scheme"
@@ -127,14 +136,24 @@ def run_project_until_terminated(project_path: str,
         + '    if didTimeout then\n'
         + '        stop workspaceDoc\n'
         + '        set stopStartDate to (current date)\n'
+        + '        set stopConfirmed to false\n'
         + '        repeat\n'
-        + '            if completed of actionResult is true then exit repeat\n'
+        + '            if completed of actionResult is true then\n'
+        + '                set stopConfirmed to true\n'
+        + '                exit repeat\n'
+        + '            end if\n'
         + '            if ((current date) - stopStartDate) >= 20 then exit repeat\n'
         + '            delay 1.0\n'
         + '        end repeat\n'
-        + f'        set outcomeText to "{_OUTCOME_TIMEOUT}"\n'
+        # Distinguish a confirmed stop from one that never took: the caller must
+        # not be told "force-stopped" when the app may still be running.
+        + '        if stopConfirmed then\n'
+        + f'            set outcomeText to "{_OUTCOME_TIMEOUT}"\n'
+        + '        else\n'
+        + f'            set outcomeText to "{_OUTCOME_TIMEOUT_UNSTOPPED}"\n'
+        + '        end if\n'
         + '    else\n'
-        + '        set outcomeText to "terminated"\n'
+        + f'        set outcomeText to "{_OUTCOME_TERMINATED}"\n'
         + '    end if\n'
         # Report the action's real outcome alongside our own. `completed` above
         # goes true for a failed build just as it does for an app that ran and
@@ -185,8 +204,33 @@ def run_project_until_terminated(project_path: str,
         raise XCodeMCPError(f"Launch failed: {output}")
 
     outcome_line, _, report_text = output.partition("\n")
-    did_timeout = outcome_line.strip() == f"{_OUTCOME_PREFIX}{_OUTCOME_TIMEOUT}"
+    stripped_outcome = outcome_line.strip()
+    outcome = (
+        stripped_outcome[len(_OUTCOME_PREFIX):]
+        if stripped_outcome.startswith(_OUTCOME_PREFIX)
+        else ""
+    )
+    did_timeout = outcome in (_OUTCOME_TIMEOUT, _OUTCOME_TIMEOUT_UNSTOPPED)
+    stop_unconfirmed = outcome == _OUTCOME_TIMEOUT_UNSTOPPED
     action_report = parse_action_result_report(report_text)
+
+    def finalize(text: str) -> str:
+        """Attach the action status, plus a caveat when the run's real outcome
+        (an unverified stop, or an external cancel) isn't a clean completion."""
+        result = annotate_with_action_status(text, action_report)
+        if stop_unconfirmed:
+            result = attach_run_warning(
+                result,
+                "Force-stop was not confirmed within 20s; the app may still be "
+                "running in Xcode. Stop it manually, then re-check get_runtime_output.",
+            )
+        elif not did_timeout and action_report.status is SchemeActionStatus.CANCELLED:
+            result = attach_run_warning(
+                result,
+                "The run was cancelled in Xcode before the app terminated on its "
+                "own; the console logs may be incomplete.",
+            )
+        return result
 
     # `run` in Xcode is build-and-run, so a failed build ends the action without
     # ever launching the app — no runtime logs will exist to collect.
@@ -198,8 +242,15 @@ def run_project_until_terminated(project_path: str,
 
     if did_timeout:
         duration = format_timeout_duration(effective_timeout)
-        print(f"App did not terminate within {duration}; force-stopped.", file=sys.stderr)
-        show_warning_notification(f"App timeout ({duration})", "Force-stopped app")
+        if stop_unconfirmed:
+            print(f"App did not terminate within {duration}; force-stop was NOT "
+                  f"confirmed within 20s — it may still be running.", file=sys.stderr)
+            show_warning_notification(f"App timeout ({duration})", "Force-stop unconfirmed")
+        else:
+            print(f"App did not terminate within {duration}; force-stopped.", file=sys.stderr)
+            show_warning_notification(f"App timeout ({duration})", "Force-stopped app")
+    elif action_report.status is SchemeActionStatus.CANCELLED:
+        print("App run was cancelled (stopped in Xcode) before natural termination.", file=sys.stderr)
     else:
         print(f"App terminated naturally.", file=sys.stderr)
 
@@ -213,9 +264,8 @@ def run_project_until_terminated(project_path: str,
 
     if not xcresult_path:
         show_error_notification("Run completed but logs unavailable", "Could not find xcresult")
-        return annotate_with_action_status(
-            "Run completed. Could not find xcresult file to extract console logs.",
-            action_report,
+        return finalize(
+            "Run completed. Could not find xcresult file to extract console logs."
         )
 
     print(f"Using xcresult: {xcresult_path}", file=sys.stderr)
@@ -225,13 +275,7 @@ def run_project_until_terminated(project_path: str,
 
     if not success:
         show_error_notification("Failed to extract logs", console_output)
-        return annotate_with_action_status(f"Run completed. {console_output}", action_report)
-
-    if not console_output:
-        show_result_notification(f"Run completed")
-        return annotate_with_action_status(
-            "Run completed. No console output found (or filtered out).", action_report
-        )
+        return finalize(f"Run completed. {console_output}")
 
     # Show result notification with error count
     import json
@@ -246,4 +290,4 @@ def run_project_until_terminated(project_path: str,
     except json.JSONDecodeError:
         show_result_notification(f"Run completed")
 
-    return annotate_with_action_status(console_output, action_report)
+    return finalize(console_output)

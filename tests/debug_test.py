@@ -18,10 +18,11 @@ def debug_project_search():
     runner.setup()
 
     try:
-        # Copy test projects
+        # Copy test projects. This script exercises get_xcode_projects (Spotlight
+        # discovery), so wait for the copied bundles to be indexed.
         print("\n=== Copying projects ===")
-        simple_app_path = runner.copy_project("SimpleApp")
-        console_app_path = runner.copy_project("ConsoleApp")
+        simple_app_path = runner.copy_project("SimpleApp", index_for_discovery=True)
+        console_app_path = runner.copy_project("ConsoleApp", index_for_discovery=True)
 
         print(f"SimpleApp copied to: {simple_app_path}")
         print(f"ConsoleApp copied to: {console_app_path}")

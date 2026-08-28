@@ -121,11 +121,11 @@ def take_simulator_screenshot(udid: Optional[str] = None) -> str:
         error_msg = "Screenshot timeout"
         show_error_notification(error_msg)
         raise XCodeMCPError("Timeout while taking screenshot")
+    except XCodeMCPError:
+        # Every path that raises XCodeMCPError above already showed a specific
+        # notification, so re-raise without notifying again — a second generic
+        # "Screenshot failed" would double up on the same error.
+        raise
     except Exception as e:
-        if isinstance(e, XCodeMCPError):
-            if "not found" not in str(e).lower() and "No booted" not in str(e):
-                show_error_notification("Screenshot failed", str(e))
-            raise
-        error_msg = "Screenshot failed"
-        show_error_notification(error_msg, str(e))
+        show_error_notification("Screenshot failed", str(e))
         raise XCodeMCPError(f"Error taking screenshot: {e}")

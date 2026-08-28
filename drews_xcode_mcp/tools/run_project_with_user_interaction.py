@@ -24,11 +24,13 @@ from drews_xcode_mcp.utils.applescript import (
     show_result_notification,
     show_error_notification,
     show_persistent_alert,
+    validate_max_lines,
 )
 from drews_xcode_mcp.utils.scheme_action import (
     ACTION_NOT_FOUND,
     SchemeActionReport,
     annotate_with_action_status,
+    attach_run_warning,
     build_action_result_report_applescript,
     describe_build_failure,
     parse_action_result_report,
@@ -93,6 +95,8 @@ def run_project_with_user_interaction(project_path: str,
             re.compile(regex_filter)
         except re.error as e:
             raise InvalidParameterError(f"Invalid regex_filter: {e}")
+
+    max_lines = validate_max_lines(max_lines)
 
     # Show running notification
     project_name = os.path.basename(normalized_path)
@@ -209,6 +213,7 @@ def run_project_with_user_interaction(project_path: str,
         return build_failure
 
     user_clicked_finish = False
+    stop_unconfirmed = False
     alert_process = None
 
     if not app_terminated:
@@ -292,13 +297,21 @@ def run_project_with_user_interaction(project_path: str,
         '''
         run_applescript(stop_script)
 
-        # Wait and verify it stopped, reusing the same action-pinned check.
+        # Wait and verify it stopped, reusing the same action-pinned check. If the
+        # stop is never confirmed, the app may still be running — record that so
+        # the caller isn't told the run completed cleanly.
+        stop_confirmed = False
         for _ in range(10):  # Wait up to 20 seconds
             success, completed_str = run_applescript(check_script)
             if success and completed_str.strip().lower() == "true":
                 print(f"App stopped successfully", file=sys.stderr)
+                stop_confirmed = True
                 break
             time.sleep(2)
+
+        if not stop_confirmed:
+            stop_unconfirmed = True
+            print("Force-stop was NOT confirmed within 20s; app may still be running.", file=sys.stderr)
 
         action_report = read_action_report()
 
@@ -311,6 +324,18 @@ def run_project_with_user_interaction(project_path: str,
         show_error_notification("Build failed - app did not launch", project_name)
         return build_failure
 
+    def finalize(text: str) -> str:
+        """Attach the action status, plus a caveat when a requested force-stop was
+        never confirmed and the app may still be running."""
+        result = annotate_with_action_status(text, action_report)
+        if stop_unconfirmed:
+            result = attach_run_warning(
+                result,
+                "Force-stop was not confirmed within 20s; the app may still be "
+                "running in Xcode. Stop it manually, then re-check get_runtime_output.",
+            )
+        return result
+
     # Wait for xcresult to finalize
     print(f"Waiting for runtime logs to become available...", file=sys.stderr)
     time.sleep(2)
@@ -321,9 +346,8 @@ def run_project_with_user_interaction(project_path: str,
 
     if not xcresult_path:
         show_error_notification("Run completed but logs unavailable", "Could not find xcresult")
-        return annotate_with_action_status(
-            "Run completed. Could not find xcresult file to extract console logs.",
-            action_report,
+        return finalize(
+            "Run completed. Could not find xcresult file to extract console logs."
         )
 
     print(f"Using xcresult: {xcresult_path}", file=sys.stderr)
@@ -333,13 +357,7 @@ def run_project_with_user_interaction(project_path: str,
 
     if not success:
         show_error_notification("Failed to extract logs", console_output)
-        return annotate_with_action_status(f"Run completed. {console_output}", action_report)
-
-    if not console_output:
-        show_result_notification(f"Run completed")
-        return annotate_with_action_status(
-            "Run completed. No console output found (or filtered out).", action_report
-        )
+        return finalize(f"Run completed. {console_output}")
 
     # Show result notification with error count
     import json
@@ -354,4 +372,4 @@ def run_project_with_user_interaction(project_path: str,
     except json.JSONDecodeError:
         show_result_notification(f"Run completed")
 
-    return annotate_with_action_status(console_output, action_report)
+    return finalize(console_output)

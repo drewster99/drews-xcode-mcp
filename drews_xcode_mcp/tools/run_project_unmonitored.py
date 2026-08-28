@@ -20,6 +20,7 @@ from drews_xcode_mcp.utils.applescript import (
     run_applescript,
     show_notification,
     show_error_notification,
+    validate_max_lines,
 )
 from drews_xcode_mcp.utils.scheme_action import (
     SchemeActionStatus,
@@ -80,6 +81,7 @@ def run_project_unmonitored(project_path: str,
     if include_warnings is not None and not isinstance(include_warnings, bool):
         raise InvalidParameterError("include_warnings must be a boolean value")
 
+    max_lines = validate_max_lines(max_lines)
     effective_timeout = resolve_build_timeout(timeout)
 
     # Validate and normalize path
@@ -155,7 +157,11 @@ def run_project_unmonitored(project_path: str,
     )
 
     return (
-        f"App '{project_name}' built successfully and launched in Xcode.\n\n"
-        f"The app is now running and will continue until you stop it manually in Xcode.\n\n"
+        f"App '{project_name}' built successfully and its launch was dispatched in "
+        f"Xcode.\n\n"
+        f"The build was verified before dispatch; the app is now running and will "
+        f"continue until you stop it manually in Xcode. (This tool returns without "
+        f"waiting on the run action, so a launch failure after a verified build is "
+        f"not observed here.)\n\n"
         f"Use get_runtime_output after termination to retrieve console logs."
     )

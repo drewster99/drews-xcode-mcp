@@ -58,8 +58,18 @@ class XcodeMCPTestRunner:
             self.server_process.terminate()
             self.server_process = None
 
-    def copy_project(self, project_name: str) -> Path:
-        """Copy a template project to the working directory."""
+    def copy_project(self, project_name: str, index_for_discovery: bool = False) -> Path:
+        """Copy a template project to the working directory.
+
+        Args:
+            project_name: Template project to copy.
+            index_for_discovery: Block until Spotlight has indexed the copied
+                bundles. Only get_xcode_projects (which searches via `mdfind`)
+                needs this; build/validation/filesystem tests never query
+                Spotlight, and on a machine where Spotlight is disabled the wait
+                would just time out. So it is opt-in, requested only by the
+                discovery tests.
+        """
         template_path = self.templates_dir / project_name
         working_path = self.working_dir / project_name
 
@@ -74,7 +84,8 @@ class XcodeMCPTestRunner:
         shutil.copytree(template_path, working_path)
         print(f"Copied {project_name} to working directory")
 
-        self.wait_for_spotlight_index(working_path)
+        if index_for_discovery:
+            self.wait_for_spotlight_index(working_path)
 
         return working_path
 

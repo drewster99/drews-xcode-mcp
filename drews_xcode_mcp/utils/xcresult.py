@@ -14,6 +14,16 @@ from drews_xcode_mcp.exceptions import InvalidParameterError
 from drews_xcode_mcp.utils.paths import LOG_DIR
 from drews_xcode_mcp.utils.build_log_parser import select_derived_data_dirs_for_project
 
+
+class XcresultReadError(Exception):
+    """Raised when a result bundle object exists to be read but could not be.
+
+    Distinct from "the bundle has no such section" (which returns []): a genuine
+    read failure of the ConsoleSessionSection must not be reported as "no console
+    output", or an Xcode-27 run whose session read failed looks identical to a
+    run that produced nothing.
+    """
+
 # Global build warning settings - initialized by CLI.
 # These are set once during startup and then read by every concurrent build
 # tool invocation. We use a one-way latch (`_BUILD_WARNINGS_LOCKED`) to make
@@ -123,7 +133,8 @@ def _get_xcresult_object(xcresult_path: str, object_id: Optional[str] = None) ->
 def _console_entries_from_session_section(xcresult_path: str) -> list:
     """
     Read console output from a bundle's ConsoleSessionSection, returning [] when
-    the bundle has none.
+    the bundle genuinely has none and raising XcresultReadError when a section
+    that should be readable could not be read.
 
     Xcode 27 moved runtime console output into a new ConsoleSessionSection and
     left the ConsoleLogSection that `get log --type console` reads as an empty
@@ -139,8 +150,8 @@ def _console_entries_from_session_section(xcresult_path: str) -> list:
     detected, dSYM was created with an executable with no debug info".
     """
     root = _get_xcresult_object(xcresult_path)
-    if not root:
-        return []
+    if root is None:
+        raise XcresultReadError("could not read result bundle root object")
 
     session_ref = None
     for action in root.get('actions') or []:
@@ -149,16 +160,22 @@ def _console_entries_from_session_section(xcresult_path: str) -> list:
             session_ref = reference['id']
             break
 
+    # No consoleSessionRef means this bundle genuinely has no session section
+    # (every pre-Xcode-27 bundle), which is a real "no output here", not a failure.
     if not session_ref:
         return []
 
     section = _get_xcresult_object(xcresult_path, session_ref)
-    if not section:
-        return []
+    if section is None:
+        raise XcresultReadError("could not read console session section")
 
     entries = []
     for item in section.get('items') or []:
-        content = (item.get('groupIO') or {}).get('endpointIO', {}).get('content', {})
+        # Guard each hop with `or {}`: a key present with a null value yields None
+        # from `.get(key, {})` (the default fires only on a MISSING key), and the
+        # next `.get`/`in` on None would raise and lose the whole run's output.
+        endpoint_io = (item.get('groupIO') or {}).get('endpointIO') or {}
+        content = endpoint_io.get('content') or {}
 
         if 'log' in content:
             log = content.get('log') or {}
@@ -296,7 +313,13 @@ def extract_console_logs_from_xcresult(xcresult_path: str,
         # without a code change — and costs an extra lookup only on runs that
         # produced no output.
         if not all_logs:
-            all_logs = _console_entries_from_session_section(xcresult_path)
+            try:
+                all_logs = _console_entries_from_session_section(xcresult_path)
+            except XcresultReadError as e:
+                # A genuine read failure of the session section must not be
+                # reported as an empty (but successful) result — that would hide
+                # the very output the caller asked for behind "no output".
+                return False, f"Failed to read console session section: {e}"
 
         if not all_logs:
             return True, json.dumps({"summary": {"total_lines": 0}, "full_log_path": None})

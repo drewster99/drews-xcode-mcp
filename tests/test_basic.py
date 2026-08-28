@@ -29,9 +29,10 @@ class BasicTests(XcodeMCPTestRunner):
 
     def test_get_xcode_projects_with_projects(self):
         """Test finding projects in directory with projects."""
-        # Copy test projects
-        simple_app_path = self.copy_project("SimpleApp")
-        console_app_path = self.copy_project("ConsoleApp")
+        # Copy test projects. These are searched for via Spotlight, so wait for
+        # the copied bundles to be indexed before querying.
+        simple_app_path = self.copy_project("SimpleApp", index_for_discovery=True)
+        console_app_path = self.copy_project("ConsoleApp", index_for_discovery=True)
 
         # Search for projects
         result = self.run_mcp_tool("get_xcode_projects", search_path=str(self.working_dir))
@@ -116,8 +117,8 @@ class BasicTests(XcodeMCPTestRunner):
 
     def test_search_all_allowed_folders(self):
         """Test searching all allowed folders when no path specified."""
-        # Copy a project
-        self.copy_project("SimpleApp")
+        # Copy a project. Discovery goes through Spotlight, so wait for indexing.
+        self.copy_project("SimpleApp", index_for_discovery=True)
 
         # Search without specifying path (should search all allowed folders)
         result = self.run_mcp_tool("get_xcode_projects")

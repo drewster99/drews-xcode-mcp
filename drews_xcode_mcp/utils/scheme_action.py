@@ -340,13 +340,19 @@ def annotate_with_action_status(output: str, report: SchemeActionReport) -> str:
     Fold a failing action status into a tool's normal output so the caller cannot
     read the result as a clean success.
 
-    Used for the case the build log cannot explain — the build succeeded and the
-    app launched, but Xcode still reports the action as failed (a crash, or a
-    nonzero exit). The runtime logs remain the useful payload, so they are kept
-    and the status is attached alongside them.
+    Used for the case the build log cannot explain. `failed` here means the app
+    launched and then exited badly (a crash, a nonzero exit), so its runtime logs
+    remain the useful payload and are kept with the status attached. `error
+    occurred` is Xcode's "the action could not run" — the app is NOT known to have
+    launched, so app_launched is reported false rather than manufacturing launch
+    evidence that isn't there.
     """
     if not report.status.indicates_failure:
         return output
+
+    # Only a `failed` run implies the app launched before it failed; `error
+    # occurred` means the action itself could not run.
+    app_launched = report.status is SchemeActionStatus.FAILED
 
     try:
         payload = json.loads(output)
@@ -356,7 +362,29 @@ def annotate_with_action_status(output: str, report: SchemeActionReport) -> str:
     if not isinstance(payload, dict):
         return f"⚠️ Xcode reported this run as '{report.status.value}'.\n\n{output}"
 
-    payload["scheme_action"] = _action_details(report, app_launched=True)
+    payload["scheme_action"] = _action_details(report, app_launched=app_launched)
+    return json.dumps(payload, indent=2)
+
+
+def attach_run_warning(output: str, warning: str) -> str:
+    """
+    Fold a human-facing warning into a tool's output without discarding it.
+
+    JSON output gains a `warnings` list entry; non-JSON output is prefixed with
+    the warning, mirroring how annotate_with_action_status handles both shapes.
+    Used to surface conditions the scheme action result cannot express on its
+    own — a force-stop that was never confirmed, or a run cancelled out from
+    under us — so the logs still reach the caller alongside the caveat.
+    """
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return f"⚠️ {warning}\n\n{output}"
+
+    if not isinstance(payload, dict):
+        return f"⚠️ {warning}\n\n{output}"
+
+    payload.setdefault("warnings", []).append(warning)
     return json.dumps(payload, indent=2)
 
 
