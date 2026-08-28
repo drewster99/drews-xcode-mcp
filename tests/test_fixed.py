@@ -33,29 +33,33 @@ class FixedTests(XcodeMCPTestRunner):
 
         print(f"✓ Version format validated: {version_num}")
 
-    def test_get_project_hierarchy_actual(self):
-        """Test that hierarchy actually reflects the file structure."""
+    def test_get_directory_tree_actual(self):
+        """Test that the directory tree actually reflects the file structure."""
         # Copy SimpleApp
         project_path = self.copy_project("SimpleApp")
         xcodeproj_path = project_path / "SimpleApp.xcodeproj"
 
-        # Get hierarchy
-        result = self.run_mcp_tool("get_project_hierarchy", project_path=str(xcodeproj_path))
+        # get_directory_tree accepts an .xcodeproj path and scans its parent
+        result = self.run_mcp_tool("get_directory_tree", directory_path=str(xcodeproj_path))
         self.assert_success(result)
 
         hierarchy = result["result"]
 
-        # Validate that hierarchy shows actual structure
-        # Should show the parent directory
+        # get_directory_tree reports directories only and says so in its output,
+        # directing callers to get_directory_listing for files.
         self.assert_contains(hierarchy, "SimpleApp/", "Should show SimpleApp directory")
         self.assert_contains(hierarchy, "SimpleApp.xcodeproj", "Should show xcodeproj")
-        self.assert_contains(hierarchy, "main.swift", "Should show main.swift file")
 
-        # Count lines to ensure we got a real hierarchy
         lines = hierarchy.strip().split('\n')
         assert len(lines) > 3, f"Hierarchy too short, only {len(lines)} lines"
+        print(f"✓ Tree contains {len(lines)} lines of actual structure")
 
-        print(f"✓ Hierarchy contains {len(lines)} lines of actual structure")
+        # The source file itself is the listing tool's job, so check it there.
+        listing = self.run_mcp_tool("get_directory_listing",
+                                    directory_path=str(project_path / "SimpleApp"))
+        self.assert_success(listing)
+        self.assert_contains(listing["result"], "main.swift", "Should list main.swift")
+        print("✓ Listing shows main.swift")
 
     def test_build_project_real(self):
         """Test actual building of a project and check real results."""
@@ -116,7 +120,7 @@ class FixedTests(XcodeMCPTestRunner):
 
         # Test 1: Path within allowed folders but doesn't exist
         fake_path = self.working_dir / "FakeProject" / "FakeProject.xcodeproj"
-        result = self.run_mcp_tool("get_project_hierarchy", project_path=str(fake_path))
+        result = self.run_mcp_tool("get_project_schemes", project_path=str(fake_path))
         self.assert_failure(result)
         # Should fail with "does not exist" since it's within allowed folders
         assert "does not exist" in result.get("error", ""), \
@@ -126,19 +130,19 @@ class FixedTests(XcodeMCPTestRunner):
         # Test 2: Invalid extension
         valid_dir = self.working_dir / "test"
         valid_dir.mkdir(exist_ok=True)
-        result = self.run_mcp_tool("get_project_hierarchy", project_path=str(valid_dir))
+        result = self.run_mcp_tool("get_project_schemes", project_path=str(valid_dir))
         self.assert_failure(result)
         self.assert_contains(result["error"], ".xcodeproj' or '.xcworkspace'")
         print("✓ Invalid extension properly rejected")
 
         # Test 3: Empty path
-        result = self.run_mcp_tool("get_project_hierarchy", project_path="")
+        result = self.run_mcp_tool("get_project_schemes", project_path="")
         self.assert_failure(result)
         self.assert_contains(result["error"], "cannot be empty")
         print("✓ Empty path properly rejected")
 
         # Test 4: Path outside allowed folders
-        result = self.run_mcp_tool("get_project_hierarchy",
+        result = self.run_mcp_tool("get_project_schemes",
                                   project_path="/tmp/SomeProject/Project.xcodeproj")
         self.assert_failure(result)
         self.assert_contains(result["error"], "not allowed")
@@ -181,8 +185,16 @@ class FixedTests(XcodeMCPTestRunner):
         result = self.run_mcp_tool("clean_project", project_path=str(xcodeproj_path))
 
         if result["success"]:
-            self.assert_contains(result["result"], "success")
-            print("✓ Clean completed successfully")
+            output = result["result"]
+            # Xcode is often still busy from a preceding build, and clean_project
+            # reports that explicitly rather than pretending it finished. Both are
+            # valid outcomes; anything else is not.
+            if "did not complete" in output:
+                print(f"⚠ Clean did not finish in time (Xcode busy): {output.strip()}")
+            else:
+                self.assert_contains(output, "success",
+                                     f"Unexpected clean result: {output.strip()!r}")
+                print("✓ Clean completed successfully")
         else:
             # Might fail if project not open in Xcode
             error = result.get("error", "")
@@ -218,7 +230,7 @@ class FixedTests(XcodeMCPTestRunner):
 
         # Test path traversal attempt
         traversal_path = self.working_dir / ".." / ".." / "etc" / "passwd.xcodeproj"
-        result = self.run_mcp_tool("get_project_hierarchy", project_path=str(traversal_path))
+        result = self.run_mcp_tool("get_project_schemes", project_path=str(traversal_path))
         self.assert_failure(result)
         assert "not allowed" in result.get("error", "").lower() or \
                "does not exist" in result.get("error", "").lower(), \
@@ -234,7 +246,7 @@ class FixedTests(XcodeMCPTestRunner):
             symlink_path.unlink()
         symlink_path.symlink_to(xcodeproj_path)
 
-        result = self.run_mcp_tool("get_project_hierarchy", project_path=str(symlink_path))
+        result = self.run_mcp_tool("get_project_schemes", project_path=str(symlink_path))
         # Should work since it resolves to allowed path
         if result["success"]:
             print("✓ Symlinks properly resolved and allowed")
@@ -253,7 +265,7 @@ def run_fixed_tests():
     try:
         # Run each test
         tests.run_test(tests.test_version_format, "Version Format Validation")
-        tests.run_test(tests.test_get_project_hierarchy_actual, "Project Hierarchy (Real)")
+        tests.run_test(tests.test_get_directory_tree_actual, "Directory Tree (Real)")
         tests.run_test(tests.test_build_project_real, "Build Project (Real)")
         tests.run_test(tests.test_build_with_errors_real, "Build With Errors (Real)")
         tests.run_test(tests.test_path_validation_comprehensive, "Path Validation (Comprehensive)")

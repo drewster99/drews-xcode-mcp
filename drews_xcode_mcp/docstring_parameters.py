@@ -24,22 +24,35 @@ from drews_xcode_mcp.exceptions import XCodeMCPError
 _ARGS_SECTION_HEADING = "Args:"
 _PARAMETER_LINE = re.compile(r"^(\w+)\s*:\s*(.*)$")
 
+# Headings that end the Args block. Needed because a docstring may place them at
+# the same indentation as the parameter names, where the dedent rule cannot see
+# them.
+_SECTION_HEADINGS = frozenset({
+    "Args:", "Arguments:", "Attributes:", "Example:", "Examples:", "Note:",
+    "Notes:", "Raises:", "Returns:", "Yields:",
+})
 
-def parse_documented_parameters(docstring: str) -> dict[str, str]:
+
+def parse_documented_parameters(docstring: str, parameter_names) -> dict[str, str]:
     """
     Extract parameter descriptions from a Google-style ``Args:`` block.
 
-    Continuation lines (indented further than the parameter name) are folded into
-    the preceding description. The block ends at the first line indented less than
-    the parameter names, which is how ``Returns:`` and ``Raises:`` terminate it
-    regardless of the indentation style a given docstring uses.
+    A line starting a new entry is recognized by naming one of the function's
+    actual parameters. That check matters because docstrings in this codebase
+    wrap continuation lines at the same indentation as the parameter name, where
+    indentation alone cannot distinguish "a new parameter" from "more of the
+    previous description" -- and guessing wrong silently truncates the text that
+    the MCP schema publishes.
 
     Args:
         docstring: A docstring already normalized by `inspect.getdoc`.
+        parameter_names: The function's parameter names, used to tell a new entry
+            apart from a continuation line.
 
     Returns:
         Parameter name mapped to its description, empty if there is no Args block.
     """
+    parameter_names = set(parameter_names)
     if not docstring:
         return {}
 
@@ -63,21 +76,22 @@ def parse_documented_parameters(docstring: str) -> dict[str, str]:
     current_parameter = None
 
     for line in body:
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped:
             continue
 
         indent = len(line) - len(line.lstrip())
-        if indent < parameter_indent:
+        if indent < parameter_indent or stripped in _SECTION_HEADINGS:
             break
 
-        if indent == parameter_indent:
-            match = _PARAMETER_LINE.match(line.strip())
-            if not match:
-                break
+        match = _PARAMETER_LINE.match(stripped) if indent == parameter_indent else None
+        if match and match.group(1) in parameter_names:
             current_parameter = match.group(1)
             description_parts[current_parameter] = [match.group(2).strip()]
         elif current_parameter is not None:
-            description_parts[current_parameter].append(line.strip())
+            description_parts[current_parameter].append(stripped)
+        else:
+            break
 
     return {
         name: " ".join(part for part in parts if part).strip()
@@ -110,8 +124,10 @@ def describe_parameters_from_docstring(func: Callable[..., Any]) -> Callable[...
     """
     documented_function = inspect.unwrap(func)
 
-    descriptions = parse_documented_parameters(inspect.getdoc(documented_function) or "")
     signature = inspect.signature(documented_function)
+    descriptions = parse_documented_parameters(
+        inspect.getdoc(documented_function) or "", signature.parameters
+    )
 
     undocumented = [
         name for name in signature.parameters if not descriptions.get(name)

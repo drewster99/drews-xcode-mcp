@@ -28,20 +28,20 @@ class MinimalTests(XcodeMCPTestRunner):
         print("\nTesting path validation logic...")
 
         # Test 1: Empty path
-        result = self.run_mcp_tool("get_project_hierarchy", project_path="")
+        result = self.run_mcp_tool("get_project_schemes", project_path="")
         self.assert_failure(result)
         assert "cannot be empty" in result.get("error", "")
         print("✓ Empty path rejected")
 
         # Test 2: Invalid extension
-        result = self.run_mcp_tool("get_project_hierarchy",
+        result = self.run_mcp_tool("get_project_schemes",
                                   project_path=str(self.working_dir / "test.txt"))
         self.assert_failure(result)
         assert ".xcodeproj' or '.xcworkspace'" in result.get("error", "")
         print("✓ Invalid extension rejected")
 
         # Test 3: Path outside allowed folders
-        result = self.run_mcp_tool("get_project_hierarchy",
+        result = self.run_mcp_tool("get_project_schemes",
                                   project_path="/private/tmp/Test.xcodeproj")
         self.assert_failure(result)
         assert "not allowed" in result.get("error", "")
@@ -49,7 +49,7 @@ class MinimalTests(XcodeMCPTestRunner):
 
         # Test 4: Valid path format but doesn't exist (within allowed folder)
         fake_path = self.working_dir / "NonExistent.xcodeproj"
-        result = self.run_mcp_tool("get_project_hierarchy",
+        result = self.run_mcp_tool("get_project_schemes",
                                   project_path=str(fake_path))
         self.assert_failure(result)
         assert "does not exist" in result.get("error", "")
@@ -93,7 +93,7 @@ class MinimalTests(XcodeMCPTestRunner):
 
         # Test with special characters in path
         special_path = self.working_dir / "Test's \"Special\" Project.xcodeproj"
-        result = self.run_mcp_tool("get_project_hierarchy",
+        result = self.run_mcp_tool("get_project_schemes",
                                   project_path=str(special_path))
         self.assert_failure(result)
         # Should handle the path gracefully even with quotes
@@ -103,7 +103,7 @@ class MinimalTests(XcodeMCPTestRunner):
         # Test with very long path
         long_name = "A" * 200
         long_path = self.working_dir / f"{long_name}.xcodeproj"
-        result = self.run_mcp_tool("get_project_hierarchy",
+        result = self.run_mcp_tool("get_project_schemes",
                                   project_path=str(long_path))
         self.assert_failure(result)
         print("✓ Long path handled")
@@ -112,44 +112,51 @@ class MinimalTests(XcodeMCPTestRunner):
         """Test that all parameter validations work correctly."""
         print("\nTesting parameter validation...")
 
-        # Create a dummy valid project path
-        valid_project = self.working_dir / "Valid.xcodeproj"
-        valid_project.mkdir(exist_ok=True)
-        (valid_project / "project.pbxproj").touch()
+        # A real project copied from the templates, not a hand-made directory with
+        # an empty project.pbxproj. Both tools below reject their bad argument
+        # before reaching Xcode, but a sham bundle turns any future ordering
+        # change into a modal "project is damaged" alert on the developer's screen.
+        project_dir = self.copy_project("SimpleApp")
+        valid_project = project_dir / "SimpleApp.xcodeproj"
 
-        # Test build_project parameters
-        result = self.run_mcp_tool("build_project",
-                                  project_path=str(valid_project),
-                                  include_warnings="not_a_boolean")  # Invalid type
-        self.assert_failure(result)
-        assert "boolean" in result.get("error", "").lower()
-        print("✓ Invalid boolean parameter rejected")
+        try:
+            # Bypasses apply_config: a configured parameter_override is a hard
+            # override that would replace the bad value under test, so the guard
+            # would never run and the result would depend on the local config.
+            result = self.run_tool_bypassing_config(
+                "build_project",
+                project_path=str(valid_project),
+                include_warnings="not_a_boolean")  # Invalid type
+            self.assert_failure(result)
+            assert "boolean" in result.get("error", "").lower(), \
+                f"Expected a 'boolean' error, got: {result.get('error')}"
+            print("✓ Invalid boolean parameter rejected")
 
-        # Test run_project parameters
-        result = self.run_mcp_tool("run_project",
-                                  project_path=str(valid_project),
-                                  wait_seconds=-5)  # Negative wait time
-        self.assert_failure(result)
-        assert "non-negative" in result.get("error", "") or "negative" in result.get("error", "")
-        print("✓ Negative wait_seconds rejected")
-
-        # Clean up
-        shutil.rmtree(valid_project)
+            result = self.run_tool_bypassing_config(
+                "run_project_until_terminated",
+                project_path=str(valid_project),
+                timeout=-5)  # Negative timeout
+            self.assert_failure(result)
+            assert "positive" in result.get("error", ""), \
+                f"Expected a 'positive' timeout error, got: {result.get('error')}"
+            print("✓ Negative timeout rejected")
+        finally:
+            shutil.rmtree(project_dir, ignore_errors=True)
 
     def test_helper_functions(self):
         """Test that helper functions work correctly."""
         print("\nTesting helper functions...")
 
-        # Test escape_applescript_string
-        import drews_xcode_mcp.__main__ as mcp_server
+        from drews_xcode_mcp.utils.applescript import escape_applescript_string
+        from drews_xcode_mcp.security import validate_and_normalize_project_path
 
         # Test escaping quotes
-        escaped = mcp_server.escape_applescript_string('Test "quoted" string')
+        escaped = escape_applescript_string('Test "quoted" string')
         assert '\\"' in escaped
         print("✓ Quotes escaped correctly")
 
         # Test escaping backslashes
-        escaped = mcp_server.escape_applescript_string('Test\\path')
+        escaped = escape_applescript_string('Test\\path')
         assert '\\\\' in escaped
         print("✓ Backslashes escaped correctly")
 
@@ -157,7 +164,7 @@ class MinimalTests(XcodeMCPTestRunner):
         test_path = self.working_dir / "Test.xcodeproj"
         test_path.mkdir(exist_ok=True)
 
-        normalized = mcp_server.validate_and_normalize_project_path(
+        normalized = validate_and_normalize_project_path(
             str(test_path), "Testing")
         assert os.path.isabs(normalized)
         print("✓ Path normalization works")
@@ -171,7 +178,7 @@ class MinimalTests(XcodeMCPTestRunner):
 
         # Test that we can't access parent directories
         parent_path = str(self.working_dir.parent / "Test.xcodeproj")
-        result = self.run_mcp_tool("get_project_hierarchy",
+        result = self.run_mcp_tool("get_project_schemes",
                                   project_path=parent_path)
         self.assert_failure(result)
         assert "not allowed" in result.get("error", "")
@@ -179,7 +186,7 @@ class MinimalTests(XcodeMCPTestRunner):
 
         # Test that we can't use .. in paths
         traversal_path = str(self.working_dir / ".." / "Test.xcodeproj")
-        result = self.run_mcp_tool("get_project_hierarchy",
+        result = self.run_mcp_tool("get_project_schemes",
                                   project_path=traversal_path)
         self.assert_failure(result)
         # Should either be blocked or normalized away

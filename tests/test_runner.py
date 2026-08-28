@@ -155,6 +155,30 @@ class XcodeMCPTestRunner:
         except Exception as e:
             return {"success": False, "error": str(e), "error_type": type(e).__name__}
 
+    def run_tool_bypassing_config(self, tool_name: str, **params) -> Dict[str, Any]:
+        """
+        Call a tool's undecorated function, skipping apply_config.
+
+        A configured parameter_override is a hard user override that replaces
+        whatever the caller passed. That is intended behavior, but it means a
+        test asserting "this tool rejects a bad argument" cannot go through
+        apply_config: the override substitutes a good value, the guard never
+        runs, and the result depends on whichever config.json happens to be on
+        the machine. Unwrapping gets the caller's value to the tool intact.
+        """
+        import inspect
+        from drews_xcode_mcp.server import mcp
+        import drews_xcode_mcp.tools  # noqa: F401 — triggers @mcp.tool() registration
+
+        tool = mcp._tool_manager._tools.get(tool_name)
+        if not tool:
+            raise ValueError(f"Tool not found: {tool_name}")
+
+        try:
+            return {"success": True, "result": inspect.unwrap(tool.fn)(**params)}
+        except Exception as e:
+            return {"success": False, "error": str(e), "error_type": type(e).__name__}
+
     def assert_success(self, result: Dict[str, Any], message: str = ""):
         """Assert that an MCP tool call was successful."""
         if not result.get("success"):

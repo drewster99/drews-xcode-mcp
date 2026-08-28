@@ -204,6 +204,22 @@ creates a second copy to drift; write it in the docstring only. An explicit
 override. A parameter absent from the `Args:` block raises at import, so the
 server will not start while a parameter is undocumented.
 
+### Configuration Overrides Are Absolute
+
+`apply_config` (`config_manager.py`) applies `parameter_overrides` from
+`~/.drews-xcode-mcp/*.json` on top of whatever the caller passed. This is
+deliberate and is NOT to be "fixed": a configured override is a hard user
+override, and nothing overrides it -- not a caller-supplied argument, not a
+tool default. Do not add a "only fill in omitted parameters" precedence rule.
+
+The consequence for tests: a tool's own parameter validation cannot be
+exercised through `apply_config`, because an override replaces the value under
+test and the guard never runs. Worse, the outcome then depends on whoever's
+config is on the machine, so the test is not hermetic. Tests that assert a
+tool rejects a bad argument must call the undecorated function
+(`XcodeMCPTestRunner.run_tool_bypassing_config`), which is the only thing that
+sees the caller's value unmodified.
+
 ## Key Implementation Details
 
 - **Notifications**: Optional macOS notifications for tool invocations (--show-notifications flag)
