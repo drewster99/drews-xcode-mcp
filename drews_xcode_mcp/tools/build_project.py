@@ -23,6 +23,7 @@ from drews_xcode_mcp.utils.applescript import (
     show_result_notification,
     show_error_notification,
     show_warning_notification,
+    validate_max_lines,
 )
 from drews_xcode_mcp.utils.xcresult import extract_build_errors_and_warnings
 from drews_xcode_mcp.utils.build_log_parser import (
@@ -322,6 +323,8 @@ def build_project(project_path: str,
     # Validate include_warnings parameter
     if include_warnings is not None and not isinstance(include_warnings, bool):
         raise InvalidParameterError("include_warnings must be a boolean value")
+
+    max_lines = validate_max_lines(max_lines)
 
     # Resolve the build timeout up front so an invalid value errors immediately,
     # before any AppleScript runs.

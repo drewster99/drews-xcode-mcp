@@ -11,7 +11,7 @@ from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstr
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.exceptions import InvalidParameterError, XCodeMCPError
 from drews_xcode_mcp.utils.xcresult import find_xcresult_for_project, extract_console_logs_from_xcresult
-from drews_xcode_mcp.utils.applescript import show_error_notification, show_warning_notification, show_result_notification
+from drews_xcode_mcp.utils.applescript import show_error_notification, show_warning_notification, show_result_notification, validate_max_lines
 
 
 @mcp.tool(annotations=TOOL_READONLY)
@@ -35,6 +35,8 @@ def get_runtime_output(project_path: str,
         JSON string with structured console output including errors, warnings, context,
         and full_log_path pointing to the complete unfiltered plaintext log file.
     """
+    max_lines = validate_max_lines(max_lines)
+
     # Validate and normalize path
     project_path = validate_and_normalize_project_path(project_path, "Getting runtime output for")
 
