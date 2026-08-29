@@ -368,13 +368,19 @@ def annotate_with_action_status(output: str, report: SchemeActionReport) -> str:
 
 def attach_run_warning(output: str, warning: str) -> str:
     """
-    Fold a human-facing warning into a tool's output without discarding it.
+    Fold a human-facing operational caveat into a tool's output without
+    discarding it.
 
-    JSON output gains a `warnings` list entry; non-JSON output is prefixed with
-    the warning, mirroring how annotate_with_action_status handles both shapes.
-    Used to surface conditions the scheme action result cannot express on its
-    own — a force-stop that was never confirmed, or a run cancelled out from
+    JSON output gains a `run_caveats` list entry; non-JSON output is prefixed
+    with the caveat, mirroring how annotate_with_action_status handles both
+    shapes. Used to surface conditions the scheme action result cannot express on
+    its own — a force-stop that was never confirmed, or a run cancelled out from
     under us — so the logs still reach the caller alongside the caveat.
+
+    The key is deliberately NOT `warnings`: the console-log payload already uses
+    `warnings` for a list of runtime OSLog-warning objects, and appending a plain
+    string to that list would corrupt it. `run_caveats` is a separate channel for
+    caveats about the run operation itself.
     """
     try:
         payload = json.loads(output)
@@ -384,7 +390,7 @@ def attach_run_warning(output: str, warning: str) -> str:
     if not isinstance(payload, dict):
         return f"⚠️ {warning}\n\n{output}"
 
-    payload.setdefault("warnings", []).append(warning)
+    payload.setdefault("run_caveats", []).append(warning)
     return json.dumps(payload, indent=2)
 
 
