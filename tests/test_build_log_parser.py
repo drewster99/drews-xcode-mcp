@@ -213,5 +213,138 @@ class ExistingBehaviorPreservedTests(unittest.TestCase):
             os.unlink(tmp_path)
 
 
+def _slf0_string(text: str) -> bytes:
+    payload = text.encode('utf-8')
+    return str(len(payload)).encode() + b'"' + payload
+
+
+def _slf0_bytes(*tokens: bytes) -> bytes:
+    return b'SLF0' + b''.join(tokens)
+
+
+def _parse_slf0(body: bytes):
+    """Write an SLF0 stream to a gzipped temp log and parse it."""
+    with tempfile.NamedTemporaryFile(suffix='.xcactivitylog', delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        with gzip.open(tmp_path, 'wb') as f:
+            f.write(body)
+        return parse_xcactivitylog(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+
+class SLF0DecodingTests(unittest.TestCase):
+    """The regression that motivated token-level decoding: scanning the raw
+    SLF0 stream let a diagnostic's path capture backtrack across token
+    boundaries, absorbing kilobytes of binary structure between an unrelated
+    compile-record path and the real warning path."""
+
+    WARNING = ('/Users/test/Proj/Cells/MHMFORMTextSelectProxyCell.swift:371:27: '
+               'warning: will never be executed\n            completion(false)\n'
+               '                          ^')
+
+    def test_path_cannot_absorb_adjacent_tokens(self):
+        """Reconstruction of the observed corruption: a compile-record string,
+        then int/classref/double/JSON/classname tokens, then the diagnostic.
+        The old blob scan produced a `file` spanning all of it."""
+        body = _slf0_bytes(
+            _slf0_string("/Users/test/Proj/ChoicePopoverViewController.swift "
+                         "(in target 'App' from project 'App')"),
+            b'1(', b'4@',
+            b'53%com.apple.dt.ActivityLogSectionAttachment.TaskMetrics',
+            b'1#', b'0#',
+            b'99*' + b'{"stime":55016,"wcDuration":353006,"wcStartTime":809981675620911,"maxRSS":219430912,"utime":21747}',
+            b'9984cf75ab23c841^', b'-',
+            _slf0_string(self.WARNING),
+        )
+        warnings, _ = _parse_slf0(body)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertEqual(
+            warnings[0]['file'],
+            '/Users/test/Proj/Cells/MHMFORMTextSelectProxyCell.swift',
+        )
+        self.assertEqual(warnings[0]['line'], 371)
+        self.assertEqual(warnings[0]['column'], 27)
+        self.assertEqual(warnings[0]['message'], 'will never be executed')
+
+    def test_duplicate_diagnostic_across_strings_counted_once(self):
+        """SLF0 repeats a diagnostic in the section text and per-message
+        strings; identical copies must not inflate warning totals."""
+        body = _slf0_bytes(_slf0_string(self.WARNING), b'2#',
+                           _slf0_string(self.WARNING))
+        warnings, _ = _parse_slf0(body)
+        self.assertEqual(len(warnings), 1)
+
+    def test_compile_record_extracted_from_string_token(self):
+        body = _slf0_bytes(_slf0_string(
+            "SwiftCompile normal arm64 /Users/test/My Proj/Foo.swift "
+            "(in target 'App' from project 'App')"))
+        _, compiled = _parse_slf0(body)
+        self.assertEqual(compiled, {'/Users/test/My Proj/Foo.swift'})
+
+    def test_string_payload_containing_token_lookalikes(self):
+        """Payload bytes are length-bounded, so text that resembles SLF0
+        tokens inside a string must not desynchronize the decoder."""
+        body = _slf0_bytes(
+            _slf0_string('log mentions 12#tokens and 5"quoted lengths'),
+            _slf0_string(self.WARNING),
+        )
+        warnings, _ = _parse_slf0(body)
+        self.assertEqual(len(warnings), 1)
+
+    def test_non_utf8_byte_in_payload_survives(self):
+        """A stray non-UTF-8 byte in one string must not lose the diagnostic
+        in a later string, and output must be valid UTF-8."""
+        raw = str(len(self.WARNING.encode()) + 1).encode() + b'"\xff' + self.WARNING.encode()
+        body = _slf0_bytes(raw)
+        warnings, _ = _parse_slf0(body)
+        self.assertEqual(len(warnings), 1)
+        warnings[0]['message'].encode('utf-8')
+
+    def test_empty_string_token(self):
+        body = _slf0_bytes(b'0"', _slf0_string(self.WARNING))
+        warnings, _ = _parse_slf0(body)
+        self.assertEqual(len(warnings), 1)
+
+    def test_truncated_mid_payload_keeps_flushed_diagnostic(self):
+        """Xcode may still be writing: a final string whose declared length
+        exceeds the bytes present is scanned as far as it goes."""
+        complete = _slf0_string(self.WARNING)
+        body = _slf0_bytes(complete + b'500"only the beginning was written')
+        warnings, _ = _parse_slf0(body)
+        self.assertEqual(len(warnings), 1)
+
+    def test_truncated_mid_prefix_returns_cleanly(self):
+        body = _slf0_bytes(_slf0_string(self.WARNING), b'12')
+        warnings, _ = _parse_slf0(body)
+        self.assertEqual(len(warnings), 1)
+
+    def test_unknown_token_type_stops_without_crashing(self):
+        body = _slf0_bytes(_slf0_string(self.WARNING), b'3!xyz',
+                           _slf0_string(self.WARNING.replace(':371:', ':999:')))
+        warnings, _ = _parse_slf0(body)
+        # Tokens before the unknown type are kept; scanning stops at it.
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]['line'], 371)
+
+    def test_non_decimal_length_stops_without_crashing(self):
+        body = _slf0_bytes(_slf0_string(self.WARNING), b'ff"AB')
+        warnings, _ = _parse_slf0(body)
+        self.assertEqual(len(warnings), 1)
+
+    def test_magicless_content_scanned_as_plain_text(self):
+        """The plain-text fallback (also exercised by the older tests above)
+        must keep working for content without the SLF0 magic."""
+        with tempfile.NamedTemporaryFile(suffix='.xcactivitylog', delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            _write_gzipped_log(tmp_path, self.WARNING + '\r')
+            warnings, _ = parse_xcactivitylog(tmp_path)
+            self.assertEqual(len(warnings), 1)
+        finally:
+            os.unlink(tmp_path)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

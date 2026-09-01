@@ -26,6 +26,23 @@ _SOURCE_EXTS = (
 )
 _SOURCE_EXT_ALT = '|'.join(_SOURCE_EXTS)
 
+# xcactivitylog payloads are SLF0 streams: a 4-byte "SLF0" magic followed by
+# back-to-back tokens with no separators. Each token is an ASCII prefix plus a
+# one-byte type marker:
+#   <decimal>#   integer            <hex>^        IEEE-754 double (raw bits)
+#   <decimal>"   string, prefix = payload byte length
+#   <decimal>*   JSON blob, same shape as a string (task metrics attachments)
+#   <decimal>%   class name, same shape as a string
+#   <decimal>@   class-instance reference (no payload)
+#   <decimal>(   list header (no payload)
+#   -            null (no prefix)
+# Diagnostics and compile records live inside `"` string payloads; everything
+# else is structure we can skip. Decoding token-by-token is what keeps a path
+# or message from bleeding across token boundaries — the byte length bounds
+# each string exactly.
+_SLF0_MAGIC = b'SLF0'
+_SLF0_TOKEN_PREFIX_RE = re.compile(rb'[0-9a-f]*')
+
 # Process-lifetime cache for parse_xcactivitylog results. xcactivitylog files
 # are written once by Xcode and never mutated, so a path+stat key is a stable
 # cache identity for the file's lifetime. Bounded to keep memory predictable
@@ -48,6 +65,165 @@ def _xcactivitylog_cache_key(log_path: str) -> Optional[Tuple[str, int, int]]:
     except OSError:
         return None
     return (log_path, st.st_mtime_ns, st.st_size)
+
+
+# Path char class: any printable byte except control bytes. We deliberately do
+# NOT exclude U+FFFD here — `errors='surrogateescape'` keeps undecodable bytes
+# as low-surrogate code points (\udc80–\udcff), so the replacement char
+# (U+FFFD, �) only appears if it was literally in the source file. Excluding it
+# would silently truncate paths whenever a single non-UTF-8 byte appears nearby.
+_PATH_CHAR = r'[^\r\n\x00-\x1f]'
+
+# Warning/error lines:
+#   /abs/path/to/File.ext:LINE:COL: warning|error: message
+# The non-greedy {path}+? combined with the literal `.ext:digits:digits:`
+# naturally terminates the path at the right place even when it contains
+# spaces. Limit the message to non-control characters so we don't slurp
+# binary trailing bytes.
+_MSG_CHAR = r'[^\n\r\x00-\x08\x0b-\x1f]'
+_WARNING_PATTERN = re.compile(
+    rf'(/{_PATH_CHAR}+?\.(?:{_SOURCE_EXT_ALT})):(\d+):(\d+): warning: ({_MSG_CHAR}+)'
+)
+_ERROR_PATTERN = re.compile(
+    rf'(/{_PATH_CHAR}+?\.(?:{_SOURCE_EXT_ALT})):(\d+):(\d+): error: ({_MSG_CHAR}+)'
+)
+
+# SwiftCompile lines:
+#   SwiftCompile normal <arch> /abs/path/to/File.swift (in target '...' from project '...')
+# The path ends at " (in target" or at end-of-line / control byte.
+_SWIFT_COMPILE_PATTERN = re.compile(
+    rf'SwiftCompile normal \S+ (/{_PATH_CHAR}+?\.swift)(?= \(in target|\s*[\r\n]|\s*$)'
+)
+
+# CompileC / CompileCpp / CompileObjC / CompileObjCpp / CompileMetalFile:
+# Format starts with the object-file path then a space then the source path:
+#   CompileC <output>.o <source>.m normal arm64 objective-c ...
+#   CompileMetalFile <source>.metal ...
+# We want the SOURCE path, which is the last filename-with-known-extension.
+# The object-file path must allow spaces too (DerivedData lives under the
+# user's home, which can contain a space) — `\S+` would break the whole
+# match and silently drop the source file from compiled_files, leaving its
+# warnings stale. Mirror the source group's space-tolerant style.
+_CC_COMPILE_PATTERN = re.compile(
+    rf'Compile(?:C|Cpp|ObjC|ObjCpp) /{_PATH_CHAR}+?\.o (/{_PATH_CHAR}+?\.(?:m|mm|c|cc|cpp|cxx))(?= \(in target|\s+normal\s|\s+[a-z]|\s*[\r\n]|\s*$)'
+)
+_METAL_COMPILE_PATTERN = re.compile(
+    rf'CompileMetalFile (/{_PATH_CHAR}+?\.metal)(?= \(in target|\s*[\r\n]|\s*$)'
+)
+
+
+def _strip_surrogates(s: str) -> str:
+    """Drop lone surrogates introduced by surrogateescape so output is valid UTF-8."""
+    return s.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+
+
+def _iter_slf0_string_payloads(data: bytes, log_path: str):
+    """
+    Walk an SLF0 byte stream and yield each string token's payload, decoded.
+
+    Only `"` string payloads are yielded — class names and JSON metrics
+    attachments never carry diagnostics, and structural tokens have no payload.
+
+    A truncated stream (Xcode still writing the file) ends iteration after the
+    bytes present; a partially-written final string is still yielded so a
+    diagnostic already flushed into it isn't lost. A malformed token — which
+    would mean the SLF0 format itself changed — is reported to stderr with its
+    offset and stops iteration rather than guessing at a resync point: token
+    boundaries are only knowable from the length prefixes, and scanning
+    misaligned bytes is exactly the corruption this decoder exists to prevent.
+    """
+    pos = len(_SLF0_MAGIC)
+    n = len(data)
+    while pos < n:
+        if data[pos] == 0x2d:  # '-' null token, no prefix
+            pos += 1
+            continue
+        prefix_match = _SLF0_TOKEN_PREFIX_RE.match(data, pos)
+        prefix = prefix_match.group(0)
+        pos = prefix_match.end()
+        if pos >= n:
+            # Truncated mid-prefix — the writer hasn't finished this token.
+            return
+        token_type = data[pos]
+        pos += 1
+        if not prefix:
+            print(
+                f"Warning: malformed SLF0 token (no prefix) at offset {pos - 1} "
+                f"in {log_path}; stopping scan",
+                file=sys.stderr,
+            )
+            return
+        if token_type in b'#@(^':
+            continue
+        if token_type in b'"*%':
+            if not prefix.isdigit():
+                print(
+                    f"Warning: malformed SLF0 length {prefix!r} at offset "
+                    f"{pos - 1} in {log_path}; stopping scan",
+                    file=sys.stderr,
+                )
+                return
+            length = int(prefix)
+            payload = data[pos:pos + length]
+            pos += length
+            if token_type == 0x22:  # '"'
+                yield payload.decode('utf-8', errors='surrogateescape')
+            continue
+        print(
+            f"Warning: unknown SLF0 token type {chr(token_type)!r} at offset "
+            f"{pos - 1} in {log_path}; stopping scan",
+            file=sys.stderr,
+        )
+        return
+
+
+def _scan_log_text(text: str, warnings: List[Dict], compiled_files: Set[str],
+                   seen_diagnostics: Set[Tuple]) -> None:
+    """
+    Scan one chunk of build-log text for diagnostics and compile records,
+    appending to `warnings` / `compiled_files` in place.
+
+    Xcode uses \\r as the line separator inside log text (and \\n inside
+    multi-line diagnostic strings), so both are treated as line breaks.
+
+    SLF0 stores the same diagnostic in more than one string (a section's full
+    text plus per-message copies), so `seen_diagnostics` dedups on the complete
+    (file, line, column, type, message) identity across chunks.
+    """
+    for raw_line in text.replace('\n', '\r').split('\r'):
+        if ': warning:' in raw_line:
+            for match in _WARNING_PATTERN.finditer(raw_line):
+                _append_diagnostic(match, 'warning', warnings, seen_diagnostics)
+        if ': error:' in raw_line:
+            for match in _ERROR_PATTERN.finditer(raw_line):
+                _append_diagnostic(match, 'error', warnings, seen_diagnostics)
+        if 'SwiftCompile normal ' in raw_line:
+            for match in _SWIFT_COMPILE_PATTERN.finditer(raw_line):
+                compiled_files.add(_strip_surrogates(match.group(1)))
+        if 'CompileC ' in raw_line or 'CompileCpp ' in raw_line \
+                or 'CompileObjC ' in raw_line or 'CompileObjCpp ' in raw_line:
+            for match in _CC_COMPILE_PATTERN.finditer(raw_line):
+                compiled_files.add(_strip_surrogates(match.group(1)))
+        if 'CompileMetalFile ' in raw_line:
+            for match in _METAL_COMPILE_PATTERN.finditer(raw_line):
+                compiled_files.add(_strip_surrogates(match.group(1)))
+
+
+def _append_diagnostic(match: "re.Match", diagnostic_type: str,
+                       warnings: List[Dict], seen_diagnostics: Set[Tuple]) -> None:
+    """Append one matched warning/error unless an identical one was already seen."""
+    entry = {
+        'file': _strip_surrogates(match.group(1)),
+        'line': int(match.group(2)),
+        'column': int(match.group(3)),
+        'message': _strip_surrogates(match.group(4).strip()),
+        'type': diagnostic_type,
+    }
+    key = (entry['file'], entry['line'], entry['column'], entry['type'], entry['message'])
+    if key in seen_diagnostics:
+        return
+    seen_diagnostics.add(key)
+    warnings.append(entry)
 
 
 class ManifestParseError(Exception):
@@ -129,9 +305,16 @@ def parse_xcactivitylog(log_path: str) -> Tuple[List[Dict], Set[str]]:
     """
     Parse an .xcactivitylog file to extract warnings and compiled files.
 
-    The log files are gzip-compressed and contain both binary and text data.
-    We use gzip to decompress and then extract text with error handling for
-    binary data.
+    The log files are gzip-compressed SLF0 token streams. The stream is decoded
+    token by token and only string payloads are scanned, so a diagnostic's file
+    path can never absorb adjacent binary tokens (scanning the raw stream with
+    regexes used to produce warnings whose `file` spanned kilobytes of SLF0
+    structure between an unrelated path and the real one). Content without the
+    SLF0 magic is scanned as plain text instead.
+
+    Identical diagnostics are deduplicated: SLF0 repeats each message in
+    several strings (section text plus per-message copies), and counting them
+    more than once would inflate the reported warning totals.
 
     Results are cached for the process lifetime keyed on path+mtime+size, so
     re-aggregating across the same N immutable build logs after the first call
@@ -161,103 +344,29 @@ def parse_xcactivitylog(log_path: str) -> Tuple[List[Dict], Set[str]]:
 
     warnings = []
     compiled_files = set()
-
-    # Path char class: any printable byte except control bytes and the
-    # path-list/colon separators. We deliberately do NOT exclude U+FFFD here
-    # — `errors='surrogateescape'` keeps undecodable bytes as low-surrogate
-    # code points (\udc80–\udcff), so the replacement char (U+FFFD, �)
-    # only appears if it was literally in the source file. Excluding it would
-    # silently truncate paths whenever a single non-UTF-8 byte appears nearby.
-    path_char = r'[^\r\n\x00-\x1f]'
-
-    # Warning/error lines:
-    #   /abs/path/to/File.ext:LINE:COL: warning|error: message
-    # The non-greedy {path}+? combined with the literal `.ext:digits:digits:`
-    # naturally terminates the path at the right place even when it contains
-    # spaces. Limit the message to non-control characters so we don't slurp
-    # binary trailing bytes.
-    msg_char = r'[^\n\r\x00-\x08\x0b-\x1f]'
-    warning_pattern = re.compile(
-        rf'(/{path_char}+?\.(?:{_SOURCE_EXT_ALT})):(\d+):(\d+): warning: ({msg_char}+)'
-    )
-    error_pattern = re.compile(
-        rf'(/{path_char}+?\.(?:{_SOURCE_EXT_ALT})):(\d+):(\d+): error: ({msg_char}+)'
-    )
-
-    # SwiftCompile lines:
-    #   SwiftCompile normal <arch> /abs/path/to/File.swift (in target '...' from project '...')
-    # The path ends at " (in target" or at end-of-line / control byte.
-    swift_compile_pattern = re.compile(
-        rf'SwiftCompile normal \S+ (/{path_char}+?\.swift)(?= \(in target|\s*[\r\n]|\s*$)'
-    )
-
-    # CompileC / CompileCpp / CompileObjC / CompileObjCpp / CompileMetalFile:
-    # Format starts with the object-file path then a space then the source path:
-    #   CompileC <output>.o <source>.m normal arm64 objective-c ...
-    #   CompileMetalFile <source>.metal ...
-    # We want the SOURCE path, which is the last filename-with-known-extension.
-    # The object-file path must allow spaces too (DerivedData lives under the
-    # user's home, which can contain a space) — `\S+` would break the whole
-    # match and silently drop the source file from compiled_files, leaving its
-    # warnings stale. Mirror the source group's space-tolerant style.
-    cc_compile_pattern = re.compile(
-        rf'Compile(?:C|Cpp|ObjC|ObjCpp) /{path_char}+?\.o (/{path_char}+?\.(?:m|mm|c|cc|cpp|cxx))(?= \(in target|\s+normal\s|\s+[a-z]|\s*[\r\n]|\s*$)'
-    )
-    metal_compile_pattern = re.compile(
-        rf'CompileMetalFile (/{path_char}+?\.metal)(?= \(in target|\s*[\r\n]|\s*$)'
-    )
-
-    def _strip_surrogates(s: str) -> str:
-        """Drop lone surrogates introduced by surrogateescape so output is valid UTF-8."""
-        return s.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+    seen_diagnostics = set()
 
     try:
         with gzip.open(log_path, 'rb') as f:
             content = f.read()
 
-        # Decode with surrogateescape so non-UTF-8 bytes survive as lone
-        # surrogates instead of collapsing into U+FFFD. That way a single
-        # stray byte doesn't terminate a regex match for the surrounding
-        # text.
-        text = content.decode('utf-8', errors='surrogateescape')
-
-        # xcactivitylog uses \r as a line separator (not \n), so the file
-        # decodes to one logical "line" tens of megabytes long. Running the
-        # non-greedy multi-extension regex over the whole blob causes
-        # catastrophic backtracking — measured at ~8s per file. Pre-splitting
-        # on the actual separators and skipping lines that obviously can't
-        # contain a match drops that to tens of milliseconds.
-        lines = text.replace('\n', '\r').split('\r')
-
-        for raw_line in lines:
-            if ': warning:' in raw_line:
-                for match in warning_pattern.finditer(raw_line):
-                    warnings.append({
-                        'file': _strip_surrogates(match.group(1)),
-                        'line': int(match.group(2)),
-                        'column': int(match.group(3)),
-                        'message': _strip_surrogates(match.group(4).strip()),
-                        'type': 'warning',
-                    })
-            if ': error:' in raw_line:
-                for match in error_pattern.finditer(raw_line):
-                    warnings.append({
-                        'file': _strip_surrogates(match.group(1)),
-                        'line': int(match.group(2)),
-                        'column': int(match.group(3)),
-                        'message': _strip_surrogates(match.group(4).strip()),
-                        'type': 'error',
-                    })
-            if 'SwiftCompile normal ' in raw_line:
-                for match in swift_compile_pattern.finditer(raw_line):
-                    compiled_files.add(_strip_surrogates(match.group(1)))
-            if 'CompileC ' in raw_line or 'CompileCpp ' in raw_line \
-                    or 'CompileObjC ' in raw_line or 'CompileObjCpp ' in raw_line:
-                for match in cc_compile_pattern.finditer(raw_line):
-                    compiled_files.add(_strip_surrogates(match.group(1)))
-            if 'CompileMetalFile ' in raw_line:
-                for match in metal_compile_pattern.finditer(raw_line):
-                    compiled_files.add(_strip_surrogates(match.group(1)))
+        if content.startswith(_SLF0_MAGIC):
+            # Decode the SLF0 token stream and scan only string payloads, so
+            # a match can never span two tokens (each string's byte length
+            # bounds it exactly).
+            for payload in _iter_slf0_string_payloads(content, log_path):
+                _scan_log_text(payload, warnings, compiled_files, seen_diagnostics)
+        else:
+            # Not an SLF0 stream. Real Xcode logs always carry the magic, but
+            # a future format change shouldn't silently drop all warnings, and
+            # the test suite feeds plain-text logs through this path. Scan the
+            # whole decoded text with the same line matcher.
+            print(
+                f"Note: {log_path} has no SLF0 magic; scanning as plain text",
+                file=sys.stderr,
+            )
+            text = content.decode('utf-8', errors='surrogateescape')
+            _scan_log_text(text, warnings, compiled_files, seen_diagnostics)
 
     except (OSError, gzip.BadGzipFile, EOFError) as e:
         print(f"Error parsing xcactivitylog {log_path}: {e}", file=sys.stderr)
