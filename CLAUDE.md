@@ -27,9 +27,12 @@ python -m drews_xcode_mcp
 
 Two MCP servers are registered against this repo:
 
-- **`drews-xcode-mcp`** — the *deployed* build (`uvx drews-xcode-mcp==<version>`).
-  It runs the published PyPI/beta release, NOT your working tree. Editing source
-  here does nothing to it until you `./deploy.sh` and switch versions.
+- **`drews-xcode-mcp`** — the *deployed* build (unpinned `uvx drews-xcode-mcp`,
+  registered at user scope). It runs the published PyPI release, NOT your
+  working tree. Editing source here does nothing to it until you `./deploy.sh`
+  and the server respawns. Unpinned uvx re-resolves "latest" on spawn using
+  uv's HTTP-cached view of the PyPI index (max-age 600s), so a respawn within
+  ~10 minutes of a deploy can still launch the previous version.
 - **`xcode-mcp-local-dev-server`** — runs your **live local source** via
   `run_local_for_claude.sh` (`cd` into the repo, then `python -m drews_xcode_mcp`).
   Use this to test uncommitted changes without deploying. (Note: the canonical
