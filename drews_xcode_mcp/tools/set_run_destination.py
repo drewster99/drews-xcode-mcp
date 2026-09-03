@@ -29,8 +29,13 @@ from drews_xcode_mcp.utils.applescript import (
 # (which reads that state) keeps reporting the previous destination for a short
 # while after the destination is set. Wait for the write to land before
 # returning, so the new destination is observable to whatever the caller does next.
+#
+# Measured against Xcode 26.5, that write consistently lands 4.99-5.23s after
+# the destination is set, so the timeout has to clear 5s by a wide margin or an
+# ordinary success would report itself as unconfirmed. The wait returns as soon
+# as the write appears, so the headroom costs nothing when it is not needed.
 CONFIRMATION_POLL_INTERVAL_SECONDS = 0.25
-CONFIRMATION_TIMEOUT_SECONDS = 5.0
+CONFIRMATION_TIMEOUT_SECONDS = 15.0
 
 # Each state read gets the remaining budget as its timeout so a stalled read
 # cannot blow past the deadline, but never less than this: a read starved of
@@ -128,12 +133,13 @@ def set_run_destination(
     Returns:
         JSON with the name and id of the destination that was set, the scheme it
         was set for, and 'active_destination_confirmed': true once Xcode's
-        on-disk workspace state reports it (polled for up to 5 seconds), or
+        on-disk workspace state reports it (polled for up to 15 seconds), or
         false with a 'note' saying what was observed instead — in which case
         get_active_run_destination may still report the old destination.
-        A Mac reports the same identifier for "My Mac" and "My Mac (Designed
-        for iPad)"; when the id matches more than one destination the first is
-        selected and all of them are listed under 'matched_destinations'.
+        A Mac reports one device identifier for several destinations ("My Mac",
+        "My Mac (Designed for iPad)", Mac Catalyst); when the id matches more
+        than one the first is selected and all are listed under
+        'matched_destinations'.
     """
     if not destination_id or not destination_id.strip():
         raise InvalidParameterError("destination_id cannot be empty")

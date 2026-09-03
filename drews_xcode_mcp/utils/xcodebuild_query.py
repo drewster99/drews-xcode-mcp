@@ -251,13 +251,34 @@ def decode_active_destinations(
     return decoded
 
 
-# Architectures Xcode embeds in a run destination identifier. Several contain an
-# underscore (arm64_32, x86_64, x86_64h), so an identifier cannot be split on '_'
-# alone: the architecture is the longest of these the identifier ends with.
-# Ordered longest-match-first.
-RUN_DESTINATION_ARCHITECTURES = (
-    'arm64_32', 'arm64e', 'arm64', 'x86_64h', 'x86_64', 'i386', 'armv7k', 'armv7s', 'armv7',
-)
+# Xcode builds the identifier in
+# -[IDERunDestination(IDERunContextRecents) _stateSavingIdentifierForDestinationSchemeRunnableIsForWatch:]
+# by joining, with '_', whichever of these are present: the device identifier,
+# the platform name, an "I" marker for an Apple-internal SDK, the SDK variant
+# (written only when it differs from the platform name), the architecture, the
+# SDK's first cohort platform, and the identifier of the device this one proxies
+# for a watch app.
+#
+# The architecture is therefore the only open-ended component, and several
+# architecture names contain the same '_' the components are joined with
+# (arm64_32, x86_64, x86_64h). So the parse anchors on the closed sets below
+# and takes whatever remains as the architecture verbatim: a new architecture
+# then survives intact instead of being split in half.
+
+# Apple declares an SDK's variants in <SDK>/SDKSettings.plist. macOS is the only
+# SDK that has any: "macos" (My Mac) and "iosmac" (Mac Catalyst).
+RUN_DESTINATION_SDK_VARIANTS = frozenset({'macos', 'iosmac'})
+
+# Platform names as DVTPlatform reports them, from Platforms/*.platform/Info.plist.
+# Used only to recognize a trailing cohort platform, never to validate the
+# platform component, so an unlisted platform cannot break the parse.
+RUN_DESTINATION_PLATFORMS = frozenset({
+    'macosx', 'iphoneos', 'iphonesimulator', 'watchos', 'watchsimulator',
+    'appletvos', 'appletvsimulator', 'xros', 'xrsimulator', 'driverkit',
+})
+
+# Marker Xcode inserts for an Apple-internal SDK.
+_INTERNAL_SDK_MARKER = 'I'
 
 
 @dataclass(frozen=True)
@@ -269,10 +290,11 @@ class RunDestinationIdentifier:
     `sdk` is the SDK name Xcode records ("iphonesimulator", "iphoneos",
     "macosx", ...) — note this is not the same vocabulary as the `platform`
     field `xcodebuild -showdestinations` reports ("iOS Simulator", "macOS").
-    `sdk_variant` is the extra component Mac destinations carry ("macos" for
-    My Mac, "iosmac" for My Mac (Designed for iPad)), and is "" for
-    identifiers without one. `sdk` and `architecture` are "" when the
-    identifier is too short to carry them.
+    `sdk_variant` is the variant component the macOS SDK carries ("macos" for
+    My Mac, "iosmac" for Mac Catalyst) and is "" for every other destination —
+    including "My Mac (Designed for iPad)", which Xcode records as the Mac's
+    device identifier under the iphoneos platform. `sdk` and `architecture` are
+    "" when the identifier does not carry them.
     """
     id: str
     sdk: str
@@ -285,43 +307,42 @@ def parse_run_destination_identifier(identifier: str) -> Optional[RunDestination
     """
     Split one stored run destination identifier into its components.
 
-    Identifiers are "<UDID>_<sdk>[_<sdk_variant>]_<arch>", e.g.
-    "12521A3C-..._iphonesimulator_arm64" or "00006040-..._macosx_macos_arm64".
-    An architecture this module does not know is taken to be the final
-    component, which leaves the variant short if that architecture itself
-    contains an underscore. A trailing component that cannot be split into an
-    SDK and an architecture is reported as "" rather than guessed, so a caller
-    that only needs the device identity still gets it. Returns None only when
-    there is no device identifier at all.
+    Identifiers look like "12521A3C-..._iphonesimulator_arm64",
+    "00006040-..._macosx_macos_arm64", a watch app's
+    "00008301-..._watchos_arm64_32_<paired iPhone UDID>", or, for a generic
+    destination that names neither a device nor an architecture,
+    "dvtdevice-DVTiPhonePlaceholder-iphoneos:placeholder_iphoneos".
+
+    Everything left after the components this module recognizes is the
+    architecture, verbatim. Returns None only when there is no device
+    identifier at all.
     """
     tokens = identifier.split('_')
     if not tokens[0]:
         return None
 
-    if len(tokens) < 3:
-        return RunDestinationIdentifier(
-            id=tokens[0],
-            sdk=tokens[1] if len(tokens) > 1 else '',
-            sdk_variant='',
-            architecture='',
-            identifier=identifier,
-        )
+    remainder = tokens[2:]
+    if remainder and remainder[0] == _INTERNAL_SDK_MARKER:
+        remainder = remainder[1:]
 
-    remainder = '_'.join(tokens[2:])
-    for candidate in RUN_DESTINATION_ARCHITECTURES:
-        if remainder == candidate or remainder.endswith('_' + candidate):
-            architecture = candidate
-            sdk_variant = remainder[:len(remainder) - len(candidate)].rstrip('_')
-            break
-    else:
-        architecture = tokens[-1]
-        sdk_variant = '_'.join(tokens[2:-1])
+    sdk_variant = ''
+    if len(remainder) > 1 and remainder[0] in RUN_DESTINATION_SDK_VARIANTS:
+        sdk_variant = remainder[0]
+        remainder = remainder[1:]
+
+    # A trailing paired-device identifier always carries a '-' or a ':', and a
+    # trailing cohort platform is a known platform name, so neither can be
+    # mistaken for part of an architecture.
+    if len(remainder) > 1 and ('-' in remainder[-1] or ':' in remainder[-1]):
+        remainder = remainder[:-1]
+    if len(remainder) > 1 and remainder[-1] in RUN_DESTINATION_PLATFORMS:
+        remainder = remainder[:-1]
 
     return RunDestinationIdentifier(
         id=tokens[0],
-        sdk=tokens[1],
+        sdk=tokens[1] if len(tokens) > 1 else '',
         sdk_variant=sdk_variant,
-        architecture=architecture,
+        architecture='_'.join(remainder),
         identifier=identifier,
     )
 

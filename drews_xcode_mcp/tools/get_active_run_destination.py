@@ -78,8 +78,9 @@ def get_active_run_destination(
         JSON with the active destination's name, id, scheme and 'sdk' (the SDK
         Xcode records it under, e.g. "iphonesimulator" — not the same vocabulary
         as the 'platform' field of list_run_destinations), plus 'architecture',
-        'sdk_variant' ("macos" for My Mac, "iosmac" for My Mac (Designed for
-        iPad)) and 'os' when known, and 'identifier', the raw stored value.
+        'sdk_variant' ("macos" for My Mac, "iosmac" for Mac Catalyst; "My Mac
+        (Designed for iPad)" carries none, being the Mac's id under the iphoneos
+        platform) and 'os' when known, and 'identifier', the raw stored value.
         Raises an error if the active destination cannot be determined (e.g. the
         project has never been opened in Xcode).
     """
