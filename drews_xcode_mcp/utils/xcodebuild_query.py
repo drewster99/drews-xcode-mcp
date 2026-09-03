@@ -27,12 +27,34 @@ def project_flag_for(project_path: str) -> str:
 
 def get_active_scheme(project_path: str) -> Optional[str]:
     """
-    Return the active scheme from xcschememanagement.plist without opening Xcode.
+    Return the scheme Xcode has selected, without opening Xcode.
 
-    "Active" here means the scheme with the lowest orderHint (the top of Xcode's
-    scheme menu). This is a side-effect-free heuristic; the only way to read the
-    truly-selected scheme is AppleScript, which would open the project in Xcode.
-    Returns None if the plist is missing or unreadable.
+    Xcode records the selected scheme in its workspace state, so that is read
+    first. Only when there is no state to read (the project has never been
+    opened) does this fall back to the scheme with the lowest orderHint in
+    xcschememanagement.plist — the top of Xcode's scheme menu, which is a guess:
+    on one machine it named the wrong scheme for 6 of 26 projects, picking a
+    Playground scheme for two workspaces and nothing at all for four.
+    Returns None if neither source can answer.
+    """
+    xcuserstate = find_xcuserstate(project_path)
+    if xcuserstate:
+        try:
+            active_scheme = decode_workspace_state(xcuserstate).get('activeScheme')
+        except XCodeMCPError as e:
+            print(f"warn: could not read workspace state for {project_path}: {e}", file=sys.stderr)
+        else:
+            if active_scheme:
+                return active_scheme
+
+    return _scheme_with_lowest_order_hint(project_path)
+
+
+def _scheme_with_lowest_order_hint(project_path: str) -> Optional[str]:
+    """
+    Return the scheme at the top of Xcode's scheme menu, read from
+    xcschememanagement.plist. Returns None if the plist is missing or unreadable
+    — a .xcworkspace has none of its own, its member projects hold them.
     """
     pattern = os.path.join(project_path, "xcuserdata", "*", "xcschemes", "xcschememanagement.plist")
     matches = glob.glob(pattern)
@@ -194,22 +216,25 @@ def find_xcuserstate(project_path: str) -> str:
     return newest_path
 
 
-def decode_active_destinations(
+def decode_workspace_state(
     xcuserstate_path: str,
     timeout_seconds: Optional[float] = None,
 ) -> Dict:
-    """Run the Swift decoder to extract the active destination per scheme.
+    """
+    Run the Swift decoder over a UserInterfaceState.xcuserstate.
 
-    Returns a dict like {"SchemeName": "UDID_sdk_arch"}, or an empty dict
-    on any failure (missing script, swift not found, timeout, bad output).
-    `timeout_seconds` overrides the default decode timeout, so a caller polling
-    against a deadline cannot be stalled past it.
+    Returns the decoded object: `activeScheme` (the scheme Xcode has selected,
+    "" when the state does not name one) and `destinationsByScheme` (scheme name
+    to raw destination identifier). `timeout_seconds` overrides the default
+    decode timeout, so a caller polling against a deadline cannot be stalled
+    past it. Raises XCodeMCPError naming what went wrong — a toolchain problem
+    must not be reported to the caller as an empty result, which reads as "this
+    project has never been run".
     """
     swift_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                'decode_active_destination.swift')
+                                'decode_workspace_state.swift')
     if not os.path.exists(swift_script):
-        print(f"warn: helper script not found: {swift_script}", file=sys.stderr)
-        return {}
+        raise XCodeMCPError(f"Workspace state decoder is missing: {swift_script}")
 
     try:
         result = subprocess.run(
@@ -218,36 +243,27 @@ def decode_active_destinations(
             timeout=timeout_seconds if timeout_seconds is not None else DECODE_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        print("warn: decode_active_destination.swift timed out", file=sys.stderr)
-        return {}
+        raise XCodeMCPError("Decoding Xcode's workspace state timed out")
     except FileNotFoundError:
-        print("warn: `swift` binary not found on PATH", file=sys.stderr)
-        return {}
+        raise XCodeMCPError("`swift` was not found on PATH, so Xcode's workspace state cannot be read")
 
     if result.returncode != 0:
-        print(
-            f"warn: decode_active_destination.swift exited {result.returncode}: "
-            f"{result.stderr.strip()}",
-            file=sys.stderr,
+        raise XCodeMCPError(
+            f"Decoding Xcode's workspace state failed ({result.returncode}): {result.stderr.strip()}"
         )
-        return {}
 
     if not result.stdout.strip():
-        return {}
+        raise XCodeMCPError("Decoding Xcode's workspace state produced no output")
 
     try:
         decoded = json.loads(result.stdout.strip())
     except json.JSONDecodeError as e:
-        print(f"warn: decode_active_destination.swift produced invalid JSON: {e}", file=sys.stderr)
-        return {}
+        raise XCodeMCPError(f"Decoding Xcode's workspace state produced invalid JSON: {e}")
 
     if not isinstance(decoded, dict):
-        print(
-            f"warn: decode_active_destination.swift produced {type(decoded).__name__}, "
-            "expected an object",
-            file=sys.stderr,
+        raise XCodeMCPError(
+            f"Decoding Xcode's workspace state produced {type(decoded).__name__}, expected an object"
         )
-        return {}
     return decoded
 
 
@@ -326,7 +342,7 @@ def parse_run_destination_identifier(identifier: str) -> Optional[RunDestination
         remainder = remainder[1:]
 
     sdk_variant = ''
-    if len(remainder) > 1 and remainder[0] in RUN_DESTINATION_SDK_VARIANTS:
+    if remainder and remainder[0] in RUN_DESTINATION_SDK_VARIANTS:
         sdk_variant = remainder[0]
         remainder = remainder[1:]
 
@@ -347,20 +363,29 @@ def parse_run_destination_identifier(identifier: str) -> Optional[RunDestination
     )
 
 
-def read_stored_run_destinations(
+@dataclass(frozen=True)
+class WorkspaceRunState:
+    """
+    What Xcode's workspace state says about running this project: the scheme it
+    has selected ("" when the state does not name one) and the run destination
+    it last used for each scheme.
+    """
+    active_scheme: str
+    destinations: Dict[str, RunDestinationIdentifier]
+
+
+def read_workspace_run_state(
     project_path: str,
     timeout_seconds: Optional[float] = None,
-) -> Dict[str, RunDestinationIdentifier]:
+) -> WorkspaceRunState:
     """
-    Return every run destination Xcode has stored in its workspace state, keyed
-    by scheme name (no Xcode side effects).
+    Read Xcode's workspace state for a project (no Xcode side effects).
 
-    This is the one reader of that state: callers that want a particular
-    scheme's destination index into the result, and read_active_run_destination
-    applies the "which scheme is active" selection on top. `timeout_seconds`
-    caps the decode, for callers polling against a deadline. Raises
-    XCodeMCPError when the state cannot be read: the project has never been
-    opened in Xcode, or nothing has been run yet.
+    This is the one reader of that state: callers wanting a particular scheme's
+    destination index into `destinations`, and select_active_run_destination
+    applies the "which scheme is active" choice on top. `timeout_seconds` caps
+    the decode, for callers polling against a deadline. Raises XCodeMCPError
+    when the state cannot be read or holds no destinations.
     """
     xcuserstate = find_xcuserstate(project_path)
     if not xcuserstate:
@@ -369,48 +394,56 @@ def read_stored_run_destinations(
             "opened in Xcode yet."
         )
 
-    scheme_destinations = decode_active_destinations(xcuserstate, timeout_seconds=timeout_seconds)
-    if not scheme_destinations:
+    decoded = decode_workspace_state(xcuserstate, timeout_seconds=timeout_seconds)
+    raw_destinations = decoded.get('destinationsByScheme') or {}
+    if not raw_destinations:
         raise XCodeMCPError(
-            "Could not determine active run destination. The project may not "
-            "have been built or run yet."
+            "Xcode's workspace state records no run destination. The project "
+            "may not have been built or run yet."
         )
 
-    parsed = {}
-    for scheme, identifier in scheme_destinations.items():
+    destinations = {}
+    for scheme, identifier in raw_destinations.items():
         if not isinstance(identifier, str):
             continue
         destination = parse_run_destination_identifier(identifier)
         if destination is not None:
-            parsed[scheme] = destination
+            destinations[scheme] = destination
 
-    if not parsed:
-        raise XCodeMCPError("No usable run destination found in workspace state.")
-    return parsed
+    if not destinations:
+        raise XCodeMCPError("No usable run destination found in Xcode's workspace state.")
+
+    active_scheme = decoded.get('activeScheme')
+    return WorkspaceRunState(
+        active_scheme=active_scheme if isinstance(active_scheme, str) else '',
+        destinations=destinations,
+    )
 
 
 def select_active_run_destination(
+    state: WorkspaceRunState,
     project_path: str,
-    stored: Dict[str, RunDestinationIdentifier],
     scheme: Optional[str] = None,
 ) -> Tuple[str, RunDestinationIdentifier]:
     """
     Choose which scheme's stored destination to treat as the active one.
 
-    Prefers the given scheme, then the active scheme, then any stored scheme —
-    a preference, because the truly-selected scheme can only be read through
-    AppleScript, which would open the project in Xcode. Takes an already-read
-    map so a caller polling the state does not decode it twice.
+    Prefers the given scheme, then the scheme Xcode has selected, then the top
+    of the scheme menu, then any stored scheme. Takes an already-read state so
+    a caller polling it does not decode twice.
     """
-    if scheme and scheme in stored:
-        return scheme, stored[scheme]
+    if scheme and scheme in state.destinations:
+        return scheme, state.destinations[scheme]
 
-    active_scheme = get_active_scheme(project_path)
-    if active_scheme and active_scheme in stored:
-        return active_scheme, stored[active_scheme]
+    if state.active_scheme in state.destinations:
+        return state.active_scheme, state.destinations[state.active_scheme]
 
-    selected_scheme = next(iter(stored))
-    return selected_scheme, stored[selected_scheme]
+    menu_top_scheme = _scheme_with_lowest_order_hint(project_path)
+    if menu_top_scheme and menu_top_scheme in state.destinations:
+        return menu_top_scheme, state.destinations[menu_top_scheme]
+
+    selected_scheme = next(iter(state.destinations))
+    return selected_scheme, state.destinations[selected_scheme]
 
 
 def read_active_run_destination(
@@ -423,8 +456,8 @@ def read_active_run_destination(
 
     Raises XCodeMCPError when the state cannot be read.
     """
-    stored = read_stored_run_destinations(project_path)
-    return select_active_run_destination(project_path, stored, scheme)
+    state = read_workspace_run_state(project_path)
+    return select_active_run_destination(state, project_path, scheme)
 
 
 def resolve_active_destination_id(project_path: str, scheme: Optional[str] = None) -> Optional[str]:

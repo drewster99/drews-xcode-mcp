@@ -66,10 +66,12 @@ def get_active_run_destination(
     run operation. This reads from Xcode's workspace state file without opening
     the project in Xcode.
 
-    Note: Xcode flushes this state to disk lazily. set_run_destination waits for
-    that write and reports 'active_destination_confirmed': true when it lands, so
-    a call made after a confirmed set reflects the new destination. If that field
-    came back false, this may still report the previous destination briefly.
+    Note: Xcode stores a destination per scheme, and both this tool and
+    set_run_destination resolve the same selected scheme from Xcode's own
+    workspace state. Xcode flushes that state lazily, so set_run_destination
+    waits for the write and reports 'active_destination_confirmed': true when it
+    lands; after a confirmed set this reports the new destination. If that field
+    came back false, this may still report the previous one briefly.
 
     Args:
         project_path: Path to an Xcode project (.xcodeproj) or workspace (.xcworkspace).

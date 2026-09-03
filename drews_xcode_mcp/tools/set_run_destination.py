@@ -13,7 +13,7 @@ from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.exceptions import InvalidParameterError, XCodeMCPError
 from drews_xcode_mcp.utils.xcodebuild_query import (
     RunDestinationIdentifier,
-    read_stored_run_destinations,
+    read_workspace_run_state,
     select_active_run_destination,
 )
 from drews_xcode_mcp.utils.applescript import (
@@ -38,9 +38,11 @@ CONFIRMATION_POLL_INTERVAL_SECONDS = 0.25
 CONFIRMATION_TIMEOUT_SECONDS = 15.0
 
 # Each state read gets the remaining budget as its timeout so a stalled read
-# cannot blow past the deadline, but never less than this: a read starved of
-# time reports "could not be read" for what is only a short budget, which would
-# turn the last attempt of every unconfirmed wait into a misleading diagnosis.
+# cannot keep the poll going indefinitely, but never less than this: a read
+# starved of time reports "could not be read" for what is only a short budget,
+# which would turn the last attempt of every unconfirmed wait into a misleading
+# diagnosis. The floor is why an unconfirmed wait can run a little past
+# CONFIRMATION_TIMEOUT_SECONDS -- the last read still gets its full floor.
 MINIMUM_STATE_READ_SECONDS = 2.0
 
 # Prefixes of the report the AppleScript returns, one field per line.
@@ -91,13 +93,16 @@ def _read_stored_destination(
     destination change into a tool failure.
     """
     try:
-        stored = read_stored_run_destinations(project_path, timeout_seconds=timeout_seconds)
+        state = read_workspace_run_state(project_path, timeout_seconds=timeout_seconds)
         if scheme:
             selected_scheme = scheme
-            destination = stored.get(scheme)
+            destination = state.destinations.get(scheme)
         else:
-            selected_scheme, destination = select_active_run_destination(project_path, stored)
-    except (XCodeMCPError, OSError) as error:
+            selected_scheme, destination = select_active_run_destination(state, project_path)
+    except Exception as error:
+        # Deliberately broad: this helper only reports whether a change that has
+        # already been applied is visible yet, so nothing it does may fail the
+        # tool. The reason travels to the caller in the note instead.
         return None, f"Xcode's workspace state could not be read: {error}"
 
     if destination is None:
@@ -205,8 +210,8 @@ end tell
             matched_names.append(line[len(_MATCH_PREFIX):].strip())
 
     # The destination is set at this point; a report we cannot read back costs
-    # only the friendly name, so fall back to the raw output for it.
-    dest_name = matched_names[0] if matched_names else output.strip()
+    # only the friendly name, so fall back to the id the caller already knows.
+    dest_name = matched_names[0] if matched_names else destination_id.strip()
     show_result_notification(f"Destination: {dest_name}", project_name)
 
     normalized_dest_id = destination_id.strip()
