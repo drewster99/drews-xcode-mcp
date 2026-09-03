@@ -10,13 +10,8 @@ from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
 from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
-from drews_xcode_mcp.exceptions import XCodeMCPError
 from drews_xcode_mcp.utils.applescript import show_result_notification
-from drews_xcode_mcp.utils.xcodebuild_query import (
-    get_active_scheme,
-    find_xcuserstate,
-    decode_active_destinations,
-)
+from drews_xcode_mcp.utils.xcodebuild_query import read_active_run_destination
 
 
 def _lookup_simulator_info(udid: str) -> tuple:
@@ -80,69 +75,32 @@ def get_active_run_destination(
         project_path: Path to an Xcode project (.xcodeproj) or workspace (.xcworkspace).
 
     Returns:
-        JSON with the active destination's name, platform, architecture, and id.
-        Returns an error message if the active destination cannot be determined
-        (e.g. the project has never been opened in Xcode).
+        JSON with the active destination's name, platform, architecture, id and
+        scheme, plus 'os' and 'variant' when the stored destination carries them.
+        Raises an error if the active destination cannot be determined (e.g. the
+        project has never been opened in Xcode).
     """
     normalized_path = validate_and_normalize_project_path(project_path, "Getting active destination for")
     project_name = os.path.basename(normalized_path)
 
-    # Find the xcuserstate file
-    xcuserstate = find_xcuserstate(normalized_path)
-    if not xcuserstate:
-        raise XCodeMCPError(
-            "No workspace state file found. The project may not have been "
-            "opened in Xcode yet."
-        )
-
-    # Decode the active destinations per scheme
-    scheme_destinations = decode_active_destinations(xcuserstate)
-    if not scheme_destinations:
-        raise XCodeMCPError(
-            "Could not determine active run destination. The project may not "
-            "have been built or run yet."
-        )
-
-    # Determine which scheme's destination to report
-    active_scheme = get_active_scheme(normalized_path)
-
-    dest_string = None
-    if active_scheme and active_scheme in scheme_destinations:
-        dest_string = scheme_destinations[active_scheme]
-    elif scheme_destinations:
-        # Fall back to first scheme's destination
-        active_scheme = next(iter(scheme_destinations))
-        dest_string = scheme_destinations[active_scheme]
-
-    if not dest_string:
-        raise XCodeMCPError("No active run destination found in workspace state.")
-
-    # Parse the destination string (format: "UDID_platform_arch"). Architecture
-    # can itself contain underscores (e.g. watchOS uses `arm64_32`), so split
-    # with maxsplit=2 to preserve the full architecture string.
-    parts = dest_string.split('_', 2)
-    if len(parts) < 3:
-        raise XCodeMCPError(f"Unexpected destination format: {dest_string}")
-
-    target_udid = parts[0]
-    platform = parts[1]
-    architecture = parts[2]
+    destination = read_active_run_destination(normalized_path)
 
     # Try to get a friendly name and OS version
-    name, os_version = _lookup_simulator_info(target_udid)
+    name, os_version = _lookup_simulator_info(destination.id)
     if not name:
-        name = target_udid
+        name = destination.id
 
     result = {
         "name": name,
-        "platform": platform,
-        "architecture": architecture,
-        "id": target_udid,
+        "platform": destination.platform,
+        "architecture": destination.architecture,
+        "id": destination.id,
     }
+    if destination.variant:
+        result["variant"] = destination.variant
     if os_version:
         result["os"] = os_version
-    if active_scheme:
-        result["scheme"] = active_scheme
+    result["scheme"] = destination.scheme
 
     show_result_notification(f"Active: {name}", project_name)
     return json.dumps(result, indent=2)

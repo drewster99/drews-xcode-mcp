@@ -253,9 +253,11 @@ hatch version major  # Increment major version
 - **`validate_and_normalize_project_path()`**: Ensures paths are absolute, exist, and are allowed by security policy
 - **`escape_applescript_string()`**: Properly escapes strings for safe AppleScript execution
 - **`utils/scheme_action.py`**: Reads and interprets Xcode scheme action results. `SchemeActionStatus` mirrors Xcode's `scheme action result status` enumeration; `build_action_result_report_applescript()` / `build_action_result_report_tail_applescript()` emit the status + error message + build log in one round trip; `parse_action_result_report()` parses it; `describe_build_failure()` decides whether a *run* action's failure was a build failure; `report_build_failure()` formats a known-failed *build* action
+- **`utils/xcodebuild_query.py` run destinations**: `read_active_run_destination()` is the single reader for the run destination Xcode records in its workspace state (`.xcuserstate`). `get_active_run_destination` reports it, and `resolve_active_destination_id()` is the thin None-returning wrapper used to prefer the active destination when picking a test destination, so the stored identifier is parsed in exactly one place. Identifiers are `<UDID>_<sdk>[_<variant>]_<arch>` — Mac destinations carry a variant (`..._macosx_macos_arm64`) and several architectures contain an underscore (`arm64_32`, `x86_64`), so `parse_run_destination_identifier()` matches a known-architecture suffix instead of splitting on `_`
 
 ### Operational Behavior
 - **Scheme Selection**: When no scheme is specified in `build_project`, the active scheme is used automatically
+- **Run Destination Confirmation**: Xcode flushes workspace state to disk lazily, so `get_active_run_destination` called right after `set_run_destination` used to report the previous destination and callers concluded the set had failed. `set_run_destination` therefore polls that same state (0.25s interval, 5s cap) after Xcode accepts the destination and returns `active_destination_confirmed` saying whether the write landed
 - **Debug Output**: Server prints debug information to stderr for troubleshooting
 - **Workspace Loading**: All operations wait for Xcode workspace to fully load before proceeding (60-second timeout)
 - **Build Log Filtering**: Build failures return structured JSON with errors/warnings (up to 25 lines) and full log path

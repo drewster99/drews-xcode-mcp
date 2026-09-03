@@ -14,7 +14,10 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from typing import Dict, List, Optional
+
+from drews_xcode_mcp.exceptions import XCodeMCPError
 
 
 def project_flag_for(project_path: str) -> str:
@@ -218,39 +221,120 @@ def decode_active_destinations(xcuserstate_path: str) -> Dict:
         return {}
 
 
-def resolve_active_destination_id(project_path: str, scheme: Optional[str] = None) -> Optional[str]:
-    """Return the UDID of the active run destination, read from Xcode's workspace
-    state (no Xcode side effects).
+# Architectures Xcode embeds in a run destination identifier. Several contain an
+# underscore (arm64_32, x86_64), so an identifier cannot be split on '_' alone:
+# the architecture is the longest of these that the identifier ends with.
+# Ordered longest-match-first.
+RUN_DESTINATION_ARCHITECTURES = (
+    'arm64_32', 'arm64e', 'arm64', 'x86_64', 'i386', 'armv7k', 'armv7s', 'armv7',
+)
 
-    Prefers the given scheme's stored destination, then the active scheme's, then
-    any stored destination. Returns None if nothing is stored or the state can't
-    be read.
+
+@dataclass(frozen=True)
+class ActiveRunDestination:
+    """
+    The run destination Xcode has stored for a scheme in its workspace state.
+
+    `platform` is the SDK name Xcode records ("iphonesimulator", "iphoneos",
+    "macosx", ...). `variant` is the extra platform component Mac destinations
+    carry ("macos"), and is "" for identifiers without one.
+    """
+    scheme: str
+    id: str
+    platform: str
+    architecture: str
+    variant: str
+    identifier: str
+
+
+def parse_run_destination_identifier(identifier: str, for_scheme: str) -> Optional[ActiveRunDestination]:
+    """
+    Parse one stored run destination identifier into its components.
+
+    Identifiers are "<UDID>_<sdk>[_<variant>]_<arch>", e.g.
+    "12521A3C-..._iphonesimulator_arm64" or "00006040-..._macosx_macos_arm64".
+    An architecture this module does not know is taken to be the final
+    component, which leaves the variant short if that architecture itself
+    contains an underscore. Returns None if the identifier does not carry at
+    least a UDID, an SDK and an architecture.
+    """
+    tokens = identifier.split('_')
+    if len(tokens) < 3:
+        return None
+
+    remainder = '_'.join(tokens[2:])
+    for candidate in RUN_DESTINATION_ARCHITECTURES:
+        if remainder == candidate or remainder.endswith('_' + candidate):
+            architecture = candidate
+            variant = remainder[:len(remainder) - len(candidate)].rstrip('_')
+            break
+    else:
+        architecture = tokens[-1]
+        variant = '_'.join(tokens[2:-1])
+
+    return ActiveRunDestination(
+        scheme=for_scheme,
+        id=tokens[0],
+        platform=tokens[1],
+        architecture=architecture,
+        variant=variant,
+        identifier=identifier,
+    )
+
+
+def read_active_run_destination(project_path: str, scheme: Optional[str] = None) -> ActiveRunDestination:
+    """
+    Return the active run destination recorded in Xcode's workspace state (no
+    Xcode side effects).
+
+    Prefers the given scheme's stored destination, then the active scheme's,
+    then any stored destination. Raises XCodeMCPError naming the step that
+    failed: the project has never been opened in Xcode, nothing has been run
+    yet, or the stored identifier could not be parsed.
     """
     xcuserstate = find_xcuserstate(project_path)
     if not xcuserstate:
-        return None
+        raise XCodeMCPError(
+            "No workspace state file found. The project may not have been "
+            "opened in Xcode yet."
+        )
 
     scheme_destinations = decode_active_destinations(xcuserstate)
     if not scheme_destinations:
-        return None
+        raise XCodeMCPError(
+            "Could not determine active run destination. The project may not "
+            "have been built or run yet."
+        )
 
-    dest_string = None
     if scheme and scheme in scheme_destinations:
-        dest_string = scheme_destinations[scheme]
+        selected_scheme = scheme
     else:
-        active = get_active_scheme(project_path)
-        if active and active in scheme_destinations:
-            dest_string = scheme_destinations[active]
+        active_scheme = get_active_scheme(project_path)
+        if active_scheme and active_scheme in scheme_destinations:
+            selected_scheme = active_scheme
         else:
-            dest_string = next(iter(scheme_destinations.values()), None)
+            selected_scheme = next(iter(scheme_destinations))
 
-    if not dest_string:
+    identifier = scheme_destinations[selected_scheme]
+    if not identifier:
+        raise XCodeMCPError("No active run destination found in workspace state.")
+
+    destination = parse_run_destination_identifier(identifier, for_scheme=selected_scheme)
+    if destination is None:
+        raise XCodeMCPError(f"Unexpected destination format: {identifier}")
+    return destination
+
+
+def resolve_active_destination_id(project_path: str, scheme: Optional[str] = None) -> Optional[str]:
+    """
+    Return the UDID of the active run destination, or None when it cannot be
+    determined — for callers that treat the active destination as a preference
+    rather than a requirement.
+    """
+    try:
+        return read_active_run_destination(project_path, scheme).id
+    except XCodeMCPError:
         return None
-
-    # Format is "UDID_platform_arch"; UDIDs use hyphens, never underscores, so
-    # the UDID is everything before the first underscore.
-    udid = dest_string.split('_', 1)[0]
-    return udid or None
 
 
 def _destination_test_rank(dest: Dict) -> int:
