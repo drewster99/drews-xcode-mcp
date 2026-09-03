@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from drews_xcode_mcp.exceptions import XCodeMCPError
 
@@ -162,6 +162,10 @@ def list_destinations(project_path: str, scheme: str, timeout: int = 30) -> List
     return destinations
 
 
+# Decoding runs `swift` on a helper script, which compiles it on each run.
+DECODE_TIMEOUT_SECONDS = 10.0
+
+
 def find_xcuserstate(project_path: str) -> str:
     """Find the most recent UserInterfaceState.xcuserstate for a project.
 
@@ -173,17 +177,33 @@ def find_xcuserstate(project_path: str) -> str:
         workspace_dir = project_path
 
     pattern = os.path.join(workspace_dir, "xcuserdata", "*", "UserInterfaceState.xcuserstate")
-    matches = glob.glob(pattern)
-    if not matches:
-        return ""
-    return max(matches, key=os.path.getmtime)
+    newest_path = ""
+    newest_modified_time = -1.0
+    for path in glob.glob(pattern):
+        try:
+            modified_time = os.path.getmtime(path)
+        except OSError:
+            # A state file can vanish between the glob and the stat (Xcode
+            # closing the workspace, xcuserdata being cleaned). One we cannot
+            # stat is simply not a candidate; raising here would fail callers
+            # for whom this read is only a lookup.
+            continue
+        if modified_time > newest_modified_time:
+            newest_modified_time = modified_time
+            newest_path = path
+    return newest_path
 
 
-def decode_active_destinations(xcuserstate_path: str) -> Dict:
+def decode_active_destinations(
+    xcuserstate_path: str,
+    timeout_seconds: Optional[float] = None,
+) -> Dict:
     """Run the Swift decoder to extract the active destination per scheme.
 
-    Returns a dict like {"SchemeName": "UDID_platform_arch"}, or an empty dict
+    Returns a dict like {"SchemeName": "UDID_sdk_arch"}, or an empty dict
     on any failure (missing script, swift not found, timeout, bad output).
+    `timeout_seconds` overrides the default decode timeout, so a caller polling
+    against a deadline cannot be stalled past it.
     """
     swift_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'decode_active_destination.swift')
@@ -194,7 +214,8 @@ def decode_active_destinations(xcuserstate_path: str) -> Dict:
     try:
         result = subprocess.run(
             ['swift', swift_script, xcuserstate_path],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True,
+            timeout=timeout_seconds if timeout_seconds is not None else DECODE_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
         print("warn: decode_active_destination.swift timed out", file=sys.stderr)
@@ -215,82 +236,110 @@ def decode_active_destinations(xcuserstate_path: str) -> Dict:
         return {}
 
     try:
-        return json.loads(result.stdout.strip())
+        decoded = json.loads(result.stdout.strip())
     except json.JSONDecodeError as e:
         print(f"warn: decode_active_destination.swift produced invalid JSON: {e}", file=sys.stderr)
         return {}
 
+    if not isinstance(decoded, dict):
+        print(
+            f"warn: decode_active_destination.swift produced {type(decoded).__name__}, "
+            "expected an object",
+            file=sys.stderr,
+        )
+        return {}
+    return decoded
+
 
 # Architectures Xcode embeds in a run destination identifier. Several contain an
-# underscore (arm64_32, x86_64), so an identifier cannot be split on '_' alone:
-# the architecture is the longest of these that the identifier ends with.
+# underscore (arm64_32, x86_64, x86_64h), so an identifier cannot be split on '_'
+# alone: the architecture is the longest of these the identifier ends with.
 # Ordered longest-match-first.
 RUN_DESTINATION_ARCHITECTURES = (
-    'arm64_32', 'arm64e', 'arm64', 'x86_64', 'i386', 'armv7k', 'armv7s', 'armv7',
+    'arm64_32', 'arm64e', 'arm64', 'x86_64h', 'x86_64', 'i386', 'armv7k', 'armv7s', 'armv7',
 )
 
 
 @dataclass(frozen=True)
-class ActiveRunDestination:
+class RunDestinationIdentifier:
     """
-    The run destination Xcode has stored for a scheme in its workspace state.
+    The components of one run destination identifier stored in Xcode's
+    workspace state.
 
-    `platform` is the SDK name Xcode records ("iphonesimulator", "iphoneos",
-    "macosx", ...). `variant` is the extra platform component Mac destinations
-    carry ("macos"), and is "" for identifiers without one.
+    `sdk` is the SDK name Xcode records ("iphonesimulator", "iphoneos",
+    "macosx", ...) — note this is not the same vocabulary as the `platform`
+    field `xcodebuild -showdestinations` reports ("iOS Simulator", "macOS").
+    `sdk_variant` is the extra component Mac destinations carry ("macos" for
+    My Mac, "iosmac" for My Mac (Designed for iPad)), and is "" for
+    identifiers without one. `sdk` and `architecture` are "" when the
+    identifier is too short to carry them.
     """
-    scheme: str
     id: str
-    platform: str
+    sdk: str
+    sdk_variant: str
     architecture: str
-    variant: str
     identifier: str
 
 
-def parse_run_destination_identifier(identifier: str, for_scheme: str) -> Optional[ActiveRunDestination]:
+def parse_run_destination_identifier(identifier: str) -> Optional[RunDestinationIdentifier]:
     """
-    Parse one stored run destination identifier into its components.
+    Split one stored run destination identifier into its components.
 
-    Identifiers are "<UDID>_<sdk>[_<variant>]_<arch>", e.g.
+    Identifiers are "<UDID>_<sdk>[_<sdk_variant>]_<arch>", e.g.
     "12521A3C-..._iphonesimulator_arm64" or "00006040-..._macosx_macos_arm64".
     An architecture this module does not know is taken to be the final
     component, which leaves the variant short if that architecture itself
-    contains an underscore. Returns None if the identifier does not carry at
-    least a UDID, an SDK and an architecture.
+    contains an underscore. A trailing component that cannot be split into an
+    SDK and an architecture is reported as "" rather than guessed, so a caller
+    that only needs the device identity still gets it. Returns None only when
+    there is no device identifier at all.
     """
     tokens = identifier.split('_')
-    if len(tokens) < 3:
+    if not tokens[0]:
         return None
+
+    if len(tokens) < 3:
+        return RunDestinationIdentifier(
+            id=tokens[0],
+            sdk=tokens[1] if len(tokens) > 1 else '',
+            sdk_variant='',
+            architecture='',
+            identifier=identifier,
+        )
 
     remainder = '_'.join(tokens[2:])
     for candidate in RUN_DESTINATION_ARCHITECTURES:
         if remainder == candidate or remainder.endswith('_' + candidate):
             architecture = candidate
-            variant = remainder[:len(remainder) - len(candidate)].rstrip('_')
+            sdk_variant = remainder[:len(remainder) - len(candidate)].rstrip('_')
             break
     else:
         architecture = tokens[-1]
-        variant = '_'.join(tokens[2:-1])
+        sdk_variant = '_'.join(tokens[2:-1])
 
-    return ActiveRunDestination(
-        scheme=for_scheme,
+    return RunDestinationIdentifier(
         id=tokens[0],
-        platform=tokens[1],
+        sdk=tokens[1],
+        sdk_variant=sdk_variant,
         architecture=architecture,
-        variant=variant,
         identifier=identifier,
     )
 
 
-def read_active_run_destination(project_path: str, scheme: Optional[str] = None) -> ActiveRunDestination:
+def read_stored_run_destinations(
+    project_path: str,
+    timeout_seconds: Optional[float] = None,
+) -> Dict[str, RunDestinationIdentifier]:
     """
-    Return the active run destination recorded in Xcode's workspace state (no
-    Xcode side effects).
+    Return every run destination Xcode has stored in its workspace state, keyed
+    by scheme name (no Xcode side effects).
 
-    Prefers the given scheme's stored destination, then the active scheme's,
-    then any stored destination. Raises XCodeMCPError naming the step that
-    failed: the project has never been opened in Xcode, nothing has been run
-    yet, or the stored identifier could not be parsed.
+    This is the one reader of that state: callers that want a particular
+    scheme's destination index into the result, and read_active_run_destination
+    applies the "which scheme is active" selection on top. `timeout_seconds`
+    caps the decode, for callers polling against a deadline. Raises
+    XCodeMCPError when the state cannot be read: the project has never been
+    opened in Xcode, or nothing has been run yet.
     """
     xcuserstate = find_xcuserstate(project_path)
     if not xcuserstate:
@@ -299,30 +348,62 @@ def read_active_run_destination(project_path: str, scheme: Optional[str] = None)
             "opened in Xcode yet."
         )
 
-    scheme_destinations = decode_active_destinations(xcuserstate)
+    scheme_destinations = decode_active_destinations(xcuserstate, timeout_seconds=timeout_seconds)
     if not scheme_destinations:
         raise XCodeMCPError(
             "Could not determine active run destination. The project may not "
             "have been built or run yet."
         )
 
-    if scheme and scheme in scheme_destinations:
-        selected_scheme = scheme
-    else:
-        active_scheme = get_active_scheme(project_path)
-        if active_scheme and active_scheme in scheme_destinations:
-            selected_scheme = active_scheme
-        else:
-            selected_scheme = next(iter(scheme_destinations))
+    parsed = {}
+    for scheme, identifier in scheme_destinations.items():
+        if not isinstance(identifier, str):
+            continue
+        destination = parse_run_destination_identifier(identifier)
+        if destination is not None:
+            parsed[scheme] = destination
 
-    identifier = scheme_destinations[selected_scheme]
-    if not identifier:
-        raise XCodeMCPError("No active run destination found in workspace state.")
+    if not parsed:
+        raise XCodeMCPError("No usable run destination found in workspace state.")
+    return parsed
 
-    destination = parse_run_destination_identifier(identifier, for_scheme=selected_scheme)
-    if destination is None:
-        raise XCodeMCPError(f"Unexpected destination format: {identifier}")
-    return destination
+
+def select_active_run_destination(
+    project_path: str,
+    stored: Dict[str, RunDestinationIdentifier],
+    scheme: Optional[str] = None,
+) -> Tuple[str, RunDestinationIdentifier]:
+    """
+    Choose which scheme's stored destination to treat as the active one.
+
+    Prefers the given scheme, then the active scheme, then any stored scheme —
+    a preference, because the truly-selected scheme can only be read through
+    AppleScript, which would open the project in Xcode. Takes an already-read
+    map so a caller polling the state does not decode it twice.
+    """
+    if scheme and scheme in stored:
+        return scheme, stored[scheme]
+
+    active_scheme = get_active_scheme(project_path)
+    if active_scheme and active_scheme in stored:
+        return active_scheme, stored[active_scheme]
+
+    selected_scheme = next(iter(stored))
+    return selected_scheme, stored[selected_scheme]
+
+
+def read_active_run_destination(
+    project_path: str,
+    scheme: Optional[str] = None,
+) -> Tuple[str, RunDestinationIdentifier]:
+    """
+    Return the (scheme, destination) pair Xcode's workspace state reports as
+    active (no Xcode side effects).
+
+    Raises XCodeMCPError when the state cannot be read.
+    """
+    stored = read_stored_run_destinations(project_path)
+    return select_active_run_destination(project_path, stored, scheme)
 
 
 def resolve_active_destination_id(project_path: str, scheme: Optional[str] = None) -> Optional[str]:
@@ -332,8 +413,8 @@ def resolve_active_destination_id(project_path: str, scheme: Optional[str] = Non
     rather than a requirement.
     """
     try:
-        return read_active_run_destination(project_path, scheme).id
-    except XCodeMCPError:
+        return read_active_run_destination(project_path, scheme)[1].id or None
+    except (XCodeMCPError, OSError):
         return None
 
 

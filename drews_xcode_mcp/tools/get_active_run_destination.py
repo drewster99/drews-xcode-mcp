@@ -75,15 +75,18 @@ def get_active_run_destination(
         project_path: Path to an Xcode project (.xcodeproj) or workspace (.xcworkspace).
 
     Returns:
-        JSON with the active destination's name, platform, architecture, id and
-        scheme, plus 'os' and 'variant' when the stored destination carries them.
+        JSON with the active destination's name, id, scheme and 'sdk' (the SDK
+        Xcode records it under, e.g. "iphonesimulator" — not the same vocabulary
+        as the 'platform' field of list_run_destinations), plus 'architecture',
+        'sdk_variant' ("macos" for My Mac, "iosmac" for My Mac (Designed for
+        iPad)) and 'os' when known, and 'identifier', the raw stored value.
         Raises an error if the active destination cannot be determined (e.g. the
         project has never been opened in Xcode).
     """
     normalized_path = validate_and_normalize_project_path(project_path, "Getting active destination for")
     project_name = os.path.basename(normalized_path)
 
-    destination = read_active_run_destination(normalized_path)
+    scheme, destination = read_active_run_destination(normalized_path)
 
     # Try to get a friendly name and OS version
     name, os_version = _lookup_simulator_info(destination.id)
@@ -92,15 +95,17 @@ def get_active_run_destination(
 
     result = {
         "name": name,
-        "platform": destination.platform,
-        "architecture": destination.architecture,
         "id": destination.id,
+        "scheme": scheme,
+        "sdk": destination.sdk,
     }
-    if destination.variant:
-        result["variant"] = destination.variant
+    if destination.sdk_variant:
+        result["sdk_variant"] = destination.sdk_variant
+    if destination.architecture:
+        result["architecture"] = destination.architecture
     if os_version:
         result["os"] = os_version
-    result["scheme"] = destination.scheme
+    result["identifier"] = destination.identifier
 
     show_result_notification(f"Active: {name}", project_name)
     return json.dumps(result, indent=2)
