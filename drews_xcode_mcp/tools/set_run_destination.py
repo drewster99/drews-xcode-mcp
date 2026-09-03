@@ -3,12 +3,14 @@
 
 import json
 import os
+import time
 
 from drews_xcode_mcp.server import mcp, TOOL_MUTATING_IDEMPOTENT
 from drews_xcode_mcp.config_manager import apply_config
 from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.exceptions import InvalidParameterError, XCodeMCPError
+from drews_xcode_mcp.utils.xcodebuild_query import resolve_active_destination_id
 from drews_xcode_mcp.utils.applescript import (
     build_open_and_wait_applescript,
     escape_applescript_string,
@@ -17,6 +19,31 @@ from drews_xcode_mcp.utils.applescript import (
     show_result_notification,
     show_error_notification,
 )
+
+# Xcode writes its workspace state to disk lazily, so get_active_run_destination
+# (which reads that state) keeps reporting the previous destination for a short
+# while after the destination is set. Wait for the write to land before
+# returning, so the new destination is observable to whatever the caller does next.
+ACTIVE_DESTINATION_POLL_INTERVAL_SECONDS = 0.25
+ACTIVE_DESTINATION_CONFIRMATION_TIMEOUT_SECONDS = 5.0
+
+
+def _wait_for_active_destination(project_path: str, destination_id: str) -> bool:
+    """
+    Poll Xcode's workspace state until it reports destination_id as active.
+
+    Returns True once the state file agrees, or False if it still does not
+    within ACTIVE_DESTINATION_CONFIRMATION_TIMEOUT_SECONDS.
+    """
+    deadline = time.monotonic() + ACTIVE_DESTINATION_CONFIRMATION_TIMEOUT_SECONDS
+    target = destination_id.casefold()
+    while True:
+        active_id = resolve_active_destination_id(project_path)
+        if active_id and active_id.casefold() == target:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(ACTIVE_DESTINATION_POLL_INTERVAL_SECONDS)
 
 
 @mcp.tool(annotations=TOOL_MUTATING_IDEMPOTENT)
@@ -35,11 +62,18 @@ def set_run_destination(
 
     Args:
         project_path: Path to an Xcode project (.xcodeproj) or workspace (.xcworkspace).
-        destination_id: The destination identifier to select. This is the 'id' field
-            from list_run_destinations output (e.g. a simulator UDID or device UDID).
+        destination_id: The destination identifier (UDID) to select. This must be the
+            'id' field from list_run_destinations output, for example
+            "E1A98967-DE69-4DF3-8ED4-8715BA6F566C". The destination's 'name' cannot be
+            used here: only the UDID is matched.
 
     Returns:
-        JSON with the name and id of the destination that was set.
+        JSON with the name and id of the destination that was set, plus
+        'active_destination_confirmed': true once Xcode's on-disk workspace
+        state reports the new destination as active (waited on for up to 5
+        seconds), or false if that write had not landed yet, in which case
+        get_active_run_destination may briefly still report the old
+        destination.
     """
     if not destination_id or not destination_id.strip():
         raise InvalidParameterError("destination_id cannot be empty")
@@ -86,7 +120,20 @@ end tell
     dest_name = output.strip()
     show_result_notification(f"Destination: {dest_name}", project_name)
 
-    return json.dumps({
+    normalized_dest_id = destination_id.strip()
+    confirmed = _wait_for_active_destination(normalized_path, normalized_dest_id)
+
+    result = {
         "name": dest_name,
-        "id": destination_id.strip(),
-    }, indent=2)
+        "id": normalized_dest_id,
+        "active_destination_confirmed": confirmed,
+    }
+    if not confirmed:
+        result["note"] = (
+            "Xcode accepted the destination, but had not yet written it to its "
+            f"workspace state after {ACTIVE_DESTINATION_CONFIRMATION_TIMEOUT_SECONDS:g} "
+            "seconds. get_active_run_destination may still report the previous "
+            "destination for a short while."
+        )
+
+    return json.dumps(result, indent=2)
