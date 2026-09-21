@@ -154,5 +154,9 @@ echo ""
 echo "And the legacy-name shim with:"
 echo ""
 echo "    uvx xcode-mcp-server==$NEW_VERSION"
+echo ""
+echo "Clear uv cache to have it picked up immediately:"
+echo "    uv cache clean drews-xcode-mcp"
+echo ""
 
 exit 0
