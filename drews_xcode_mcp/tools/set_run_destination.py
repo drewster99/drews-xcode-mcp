@@ -20,7 +20,6 @@ from drews_xcode_mcp.utils.applescript import (
     build_open_and_wait_applescript,
     escape_applescript_string,
     run_applescript,
-    show_notification,
     show_result_notification,
     show_error_notification,
 )
@@ -153,8 +152,6 @@ def set_run_destination(
     escaped_path = escape_applescript_string(normalized_path)
     escaped_dest_id = escape_applescript_string(destination_id.strip())
     project_name = os.path.basename(normalized_path)
-
-    show_notification("Setting Destination", project_name, destination_id)
 
     script = build_open_and_wait_applescript(escaped_path) + f'''
     set targetDeviceId to "{escaped_dest_id}"
