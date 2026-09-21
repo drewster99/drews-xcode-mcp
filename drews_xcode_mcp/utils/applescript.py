@@ -110,7 +110,10 @@ def build_open_and_wait_applescript(escaped_path: str, escaped_scheme: Optional[
     `end tell`.
 
     If the project is already open, it will be brought to focus rather than
-    re-opened, avoiding unnecessary delays.
+    re-opened, avoiding unnecessary delays. If a scheme is provided and it is
+    already the active scheme, the scheme is left untouched rather than
+    re-set, since re-setting it redraws Xcode's scheme picker and brings the
+    project window forward.
 
     Args:
         escaped_path: Project path, already passed through escape_applescript_string.
@@ -119,7 +122,16 @@ def build_open_and_wait_applescript(escaped_path: str, escaped_scheme: Optional[
     """
     scheme_decl = f'set schemeName to "{escaped_scheme}"\n' if escaped_scheme else ""
     scheme_setup = (
-        "    set active scheme of workspaceDoc to (first scheme of workspaceDoc whose name is schemeName)\n"
+        "    -- Setting the active scheme redraws Xcode's scheme picker, which\n"
+        "    -- brings the project window forward as a side effect; skip the\n"
+        "    -- write when the requested scheme is already active.\n"
+        "    set currentSchemeName to \"\"\n"
+        "    try\n"
+        "        set currentSchemeName to name of active scheme of workspaceDoc\n"
+        "    end try\n"
+        "    if currentSchemeName is not equal to schemeName then\n"
+        "        set active scheme of workspaceDoc to (first scheme of workspaceDoc whose name is schemeName)\n"
+        "    end if\n"
         if escaped_scheme else ""
     )
     return (

@@ -178,7 +178,24 @@ def set_run_destination(
         error "No run destination found with identifier: " & targetDeviceId
     end if
 
-    set active run destination of workspaceDoc to foundDest
+    -- Setting the active run destination redraws Xcode's destination picker,
+    -- which brings the project window forward as a side effect; skip the
+    -- write when the requested destination is already active. A device
+    -- identifier alone is not enough to tell: a single Mac reports the same
+    -- device identifier for "My Mac", "My Mac (Designed for iPad)", and the
+    -- Mac Catalyst variant, so the name must match too, or switching between
+    -- those would be silently skipped as a no-op.
+    set foundDestName to name of foundDest
+    set currentDevId to ""
+    set currentDestName to ""
+    try
+        set currentDestination to active run destination of workspaceDoc
+        set currentDevId to device identifier of (device of currentDestination)
+        set currentDestName to name of currentDestination
+    end try
+    if not (currentDevId is equal to targetDeviceId and currentDestName is equal to foundDestName) then
+        set active run destination of workspaceDoc to foundDest
+    end if
 
     -- The write lands under the selected scheme's key in the workspace state,
     -- so report which scheme that is. Xcode can refuse this while busy.
