@@ -3,54 +3,13 @@
 
 import json
 import os
-import subprocess
-import sys
 
 from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
 from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import validate_and_normalize_project_path
 from drews_xcode_mcp.utils.applescript import show_result_notification
-from drews_xcode_mcp.utils.xcodebuild_query import read_active_run_destination
-
-
-def _lookup_simulator_info(udid: str) -> tuple:
-    """
-    Look up a simulator name and OS version by UDID using xcrun simctl.
-    Returns (name, os_version) or ("", "").
-    """
-    try:
-        result = subprocess.run(
-            ['xcrun', 'simctl', 'list', 'devices', udid],
-            capture_output=True, text=True, timeout=5,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"warn: simctl list devices timed out for {udid}", file=sys.stderr)
-        return ("", "")
-    except FileNotFoundError:
-        print("warn: `xcrun` binary not found on PATH", file=sys.stderr)
-        return ("", "")
-
-    if result.returncode != 0:
-        print(
-            f"warn: simctl list devices exited {result.returncode}: "
-            f"{result.stderr.strip()}",
-            file=sys.stderr,
-        )
-        return ("", "")
-
-    current_os = ""
-    for line in result.stdout.split('\n'):
-        stripped = line.strip()
-        # Track OS version from section headers like "-- iOS 26.4 --"
-        if stripped.startswith('-- ') and stripped.endswith(' --'):
-            current_os = stripped[3:-3]  # e.g. "iOS 26.4"
-        elif udid in stripped:
-            paren_idx = stripped.find('(')
-            if paren_idx > 0:
-                name = stripped[:paren_idx].strip()
-                return (name, current_os)
-    return ("", "")
+from drews_xcode_mcp.utils.xcodebuild_query import lookup_simulator_info, read_active_run_destination
 
 
 @mcp.tool(annotations=TOOL_READONLY)
@@ -92,7 +51,7 @@ def get_active_run_destination(
     scheme, destination = read_active_run_destination(normalized_path)
 
     # Try to get a friendly name and OS version
-    name, os_version = _lookup_simulator_info(destination.id)
+    name, os_version = lookup_simulator_info(destination.id)
     if not name:
         name = destination.id
 

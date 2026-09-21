@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """get_xcode_projects tool - Find Xcode projects and workspaces"""
 
+import json
 import os
 import sys
 import subprocess
@@ -10,8 +11,10 @@ from drews_xcode_mcp.server import mcp, TOOL_READONLY
 from drews_xcode_mcp.config_manager import apply_config
 from drews_xcode_mcp.docstring_parameters import describe_parameters_from_docstring
 from drews_xcode_mcp.security import ALLOWED_FOLDERS, is_path_allowed
-from drews_xcode_mcp.exceptions import AccessDeniedError, InvalidParameterError
+from drews_xcode_mcp.exceptions import AccessDeniedError, InvalidParameterError, XCodeMCPError
 from drews_xcode_mcp.utils.applescript import show_access_denied_notification, show_error_notification, show_result_notification, show_warning_notification
+from drews_xcode_mcp.utils.scheme_parser import get_available_schemes, get_current_scheme
+from drews_xcode_mcp.utils.xcodebuild_query import lookup_simulator_info, read_active_run_destination
 
 # Tracks .xcodeproj paths created during this server session, so they can
 # be returned by get_xcode_projects before Spotlight indexes them.
@@ -23,47 +26,52 @@ def register_created_project(xcodeproj_path: str):
     _recently_created_projects.append(xcodeproj_path)
 
 
-def _get_recent_xcode_projects(include_open: bool = False) -> tuple[list[str], dict]:
+def _get_open_and_recent_projects() -> tuple[list[str], list[str]]:
     """
-    Get recently opened Xcode projects by decoding macOS shared file list.
+    Get currently open and recently opened Xcode projects.
 
-    Args:
-        include_open: If True, also include currently open projects from Xcode
+    Open projects come from Xcode's AppleScript `workspace documents`. Recents
+    come from decoding macOS's shared file list (Xcode's own recent documents),
+    trying the newer .sfl4 format first and falling back to .sfl3 for older
+    macOS versions. A project that is both open and in the recents list is
+    reported only in the open list.
 
     Returns:
-        Tuple of (list of paths, metadata dict with activeScheme/activeRunDestination if available)
-        Returns (empty list, {}) if unable to decode recents.
+        Tuple of (open_paths, recent_paths). Both empty on any failure.
     """
     try:
-        # Get path to Swift decoder script
         utils_dir = os.path.dirname(os.path.abspath(__file__))
         parent_dir = os.path.dirname(utils_dir)
         swift_script = os.path.join(parent_dir, 'utils', 'decode_xcode_recents.swift')
 
         if not os.path.exists(swift_script):
             print(f"Warning: Swift decoder not found at {swift_script}", file=sys.stderr)
-            return [], {}
+            return [], []
 
-        # Build arguments for Swift script
-        args = ['swift', swift_script]
-        if include_open:
-            args.append('--include-open')
-
-        # Run Swift script to decode bookmark data
-        result = subprocess.run(args,
-                              capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            ['swift', swift_script, '--include-open'],
+            capture_output=True, text=True, timeout=10,
+        )
 
         if result.returncode != 0 or not result.stdout.strip():
-            return [], {}
+            return [], []
 
-        # Parse output: paths
-        lines = result.stdout.strip().split('\n')
-        paths = [line for line in lines if line and os.path.exists(line)]
+        open_paths = []
+        recent_paths = []
+        for line in result.stdout.strip().split('\n'):
+            if line.startswith('OPEN:'):
+                path = line[len('OPEN:'):]
+                if path and os.path.exists(path):
+                    open_paths.append(path)
+            elif line.startswith('RECENT:'):
+                path = line[len('RECENT:'):]
+                if path and os.path.exists(path):
+                    recent_paths.append(path)
 
-        return paths, {}
+        return open_paths, recent_paths
     except Exception as e:
-        print(f"Warning: Failed to get recent projects: {e}", file=sys.stderr)
-        return [], {}
+        print(f"Warning: Failed to get open/recent projects: {e}", file=sys.stderr)
+        return [], []
 
 
 def _filter_project_results(paths: list[str], search_paths: list[str] = None, max_depth: int = None, regex_filter: str = None) -> list[str]:
@@ -200,35 +208,116 @@ def _filter_project_results(paths: list[str], search_paths: list[str] = None, ma
     return final_results
 
 
+def _build_open_entry(path: str) -> tuple[dict | None, str | None]:
+    """
+    Build a `currently_open` entry with current scheme and run destination.
+
+    Both are read without opening/side-effecting Xcode: the scheme comes from
+    parsing xcschememanagement.plist, the destination from Xcode's workspace
+    state file.
+
+    Returns:
+        (entry, None) on success, or (None, warning_message) if either the
+        scheme or the destination can't be determined -- the caller should
+        downgrade this project to the `recent` group in that case.
+    """
+    scheme = get_current_scheme(path)
+    if not scheme:
+        return None, f"Could not determine current scheme for open project '{path}'; listing as recent instead."
+
+    try:
+        _, destination = read_active_run_destination(path, scheme)
+    except (XCodeMCPError, OSError) as e:
+        return None, f"Could not determine run destination for open project '{path}' ({e}); listing as recent instead."
+
+    name, _os_version = lookup_simulator_info(destination.id)
+    destination_name = name or destination.id
+
+    entry = {
+        "project": path,
+        "current_scheme": scheme,
+        "current_run_destination": destination_name,
+        "guidance": {
+            "build": f"`build_project(project_path='{path}', scheme='{scheme}')`",
+            "build_and_run": f"`run_project_with_user_interaction(project_path='{path}', scheme='{scheme}')`",
+            "change_destination": (
+                f"`list_run_destinations(project_path='{path}', scheme='{scheme}')` to see options, "
+                f"then `set_run_destination(project_path='{path}', run_destination='...')`"
+            ),
+        },
+    }
+    return entry, None
+
+
+def _build_recent_entry(path: str) -> dict:
+    """Build a `recent` entry listing the project's available schemes."""
+    schemes = get_available_schemes(path)
+
+    guidance = {
+        "list_schemes": f"`get_project_schemes(project_path='{path}')`",
+    }
+    if schemes:
+        guidance["build"] = f"`build_project(project_path='{path}', scheme='{schemes[0]}')`"
+
+    return {
+        "project": path,
+        "available_schemes": schemes,
+        "guidance": guidance,
+    }
+
+
+def _build_other_entry(path: str) -> dict:
+    """Build an `other_projects` entry -- just enough to look up schemes next."""
+    return {
+        "project": path,
+        "guidance": {
+            "list_schemes": f"`get_project_schemes(project_path='{path}')`",
+        },
+    }
+
+
 @mcp.tool(annotations=TOOL_READONLY)
 @describe_parameters_from_docstring
 @apply_config
 def get_xcode_projects(
     search_path: str = "",
-    include_recents: bool = True,
     max_search_depth: int = 3,
     regex_filter: str = None,
     max_results: int = 10
 ) -> str:
     """
-    Search for .xcodeproj and .xcworkspace files, optionally including recent projects.
+    Find Xcode projects and workspaces, grouped by how ready they are to build.
 
-    If search_path is empty, searches all paths to which this tool has been granted access.
-    Uses `mdfind` (Spotlight indexing) to find files efficiently.
+    Returns JSON grouped into three categories:
+    - currently_open: projects open in Xcode right now, with their current
+      scheme and run destination, and exact ready-to-call commands to build
+      or build-and-run. Always returned in full -- never truncated by
+      max_results.
+    - recent: projects from Xcode's recent-documents list that are not
+      currently open, with their available schemes.
+    - other_projects: everything else found by a filesystem search.
+
+    recent and other_projects together are capped at max_results, with recent
+    taking precedence -- other_projects only fills remaining room after all
+    (unfiltered) recents are counted.
+
+    If search_path is empty, searches all paths to which this tool has been
+    granted access. Uses `mdfind` (Spotlight indexing) to find files
+    efficiently for the other_projects group.
 
     Args:
-        search_path: Path to search. If empty, searches all allowed folders.
-        include_recents: If True, include recently opened projects first (default: True)
+        search_path: Path to search for other_projects. If empty, searches all allowed folders.
         max_search_depth: Maximum directory depth from search path (default: 3)
                          Depth 0 = directly in search path, depth 1 = one level down, etc.
         regex_filter: Optional regex pattern to filter results
-        max_results: Maximum number of results to return (default: 10)
+        max_results: Maximum combined number of recent + other_projects entries to return (default: 10)
 
     Returns:
-        A newline-separated list of .xcodeproj and .xcworkspace paths.
-        Recent projects appear first if include_recents=True.
-        Returns empty string if none are found.
+        JSON string: {"result": "success" | "success_with_warnings", "warnings": [...],
+        "guidance": "...", "content": {"currently_open": [...], "recent": [...], "other_projects": [...]}}
     """
+    warnings: list[str] = []
+
     # Determine paths to search
     paths_to_search = []
 
@@ -264,7 +353,6 @@ def get_xcode_projects(
     # incomplete".
     mdfind_timeout_seconds = 30
     all_results = []
-    search_warnings = []
     for path in paths_to_search:
         try:
             mdfindResult = subprocess.run(
@@ -278,17 +366,17 @@ def get_xcode_projects(
                 all_results.extend(stdout.split('\n'))
         except subprocess.TimeoutExpired:
             reason = f"mdfind timed out after {mdfind_timeout_seconds}s"
-            search_warnings.append(f"{path}: {reason}")
+            warnings.append(f"{path}: {reason}")
             show_warning_notification(f"mdfind timed out for {os.path.basename(path)}")
             print(f"Warning: {reason} in {path}", file=sys.stderr)
         except subprocess.CalledProcessError as e:
             reason = f"mdfind exited {e.returncode}: {(e.stderr or '').strip() or '(no stderr)'}"
-            search_warnings.append(f"{path}: {reason}")
+            warnings.append(f"{path}: {reason}")
             show_warning_notification(f"mdfind failed for {os.path.basename(path)}", reason)
             print(f"Warning: {reason} in {path}", file=sys.stderr)
         except OSError as e:
             reason = f"mdfind not invokable: {e}"
-            search_warnings.append(f"{path}: {reason}")
+            warnings.append(f"{path}: {reason}")
             show_warning_notification(f"mdfind failed for {os.path.basename(path)}", str(e))
             print(f"Warning: {reason} in {path}", file=sys.stderr)
 
@@ -299,67 +387,70 @@ def get_xcode_projects(
         if path not in mdfind_set and os.path.exists(path):
             all_results.append(path)
 
-    # Get recent projects if requested
-    recent_projects = []
-    if include_recents:
-        recent_projects, _ = _get_recent_xcode_projects(include_open=True)
-        # Filter recents with same criteria
-        recent_projects = _filter_project_results(
-            recent_projects,
-            search_paths=paths_to_search,
-            max_depth=max_search_depth,
-            regex_filter=regex_filter
-        )
-
-    # Filter mdfind results
-    filtered_results = _filter_project_results(
-        all_results,
-        search_paths=paths_to_search,
-        max_depth=max_search_depth,
-        regex_filter=regex_filter
+    # Get open and recent projects
+    open_paths, recent_paths = _get_open_and_recent_projects()
+    open_paths = _filter_project_results(
+        open_paths, search_paths=paths_to_search, max_depth=None, regex_filter=regex_filter
+    )
+    recent_paths = _filter_project_results(
+        recent_paths, search_paths=paths_to_search, max_depth=max_search_depth, regex_filter=regex_filter
     )
 
-    # Combine recents (first) + mdfind results, removing duplicates
-    # Use dict to preserve order while removing duplicates
-    combined = {}
-    for path in recent_projects:
-        combined[path] = True
-    for path in filtered_results:
-        combined[path] = True
+    # Filter mdfind ("other") results, excluding anything already in open/recent
+    other_paths = _filter_project_results(
+        all_results, search_paths=paths_to_search, max_depth=max_search_depth, regex_filter=regex_filter
+    )
+    open_and_recent_set = set(open_paths) | set(recent_paths)
+    other_paths = [p for p in other_paths if p not in open_and_recent_set]
 
-    unique_results = list(combined.keys())
-
-    # Apply max_results limit
-    if max_results and max_results > 0:
-        unique_results = unique_results[:max_results]
-
-    # Show result notification
-    if unique_results:
-        count = len(unique_results)
-        # Get first 3 project names for notification
-        sample_names = [os.path.basename(p) for p in unique_results[:3]]
-        if count <= 3:
-            details = "\n".join(f"• {name}" for name in sample_names)
+    # Build currently_open entries, downgrading any that fail to recent
+    currently_open = []
+    downgraded_to_recent = []
+    for path in open_paths:
+        entry, warning = _build_open_entry(path)
+        if entry:
+            currently_open.append(entry)
         else:
-            details = "\n".join(f"• {name}" for name in sample_names) + f"\n• +{count - 3} more"
+            warnings.append(warning)
+            downgraded_to_recent.append(path)
 
-        # Add note about recents if included
-        note = f"Found {count} project{'s' if count != 1 else ''}"
-        if include_recents and recent_projects:
-            note += f" ({len(recent_projects)} recent)"
-        show_result_notification(note, details)
+    # Recent = original recents + any downgraded open projects, deduplicated,
+    # downgraded ones first since they were just open a moment ago
+    recent_combined = list(dict.fromkeys(downgraded_to_recent + recent_paths))
+
+    # Apply max_results to recent (precedence) + other combined
+    remaining = max_results if max_results and max_results > 0 else None
+    if remaining is not None:
+        recent_combined = recent_combined[:remaining]
+        remaining_after_recent = max(0, remaining - len(recent_combined))
+        other_paths = other_paths[:remaining_after_recent]
+
+    recent_entries = [_build_recent_entry(p) for p in recent_combined]
+    other_entries = [_build_other_entry(p) for p in other_paths]
+
+    total_count = len(currently_open) + len(recent_entries) + len(other_entries)
+    if total_count:
+        show_result_notification(
+            f"Found {total_count} project{'s' if total_count != 1 else ''}",
+            f"{len(currently_open)} open, {len(recent_entries)} recent, {len(other_entries)} other",
+        )
     else:
         show_result_notification("No projects found")
 
-    result = '\n'.join(unique_results) if unique_results else ""
-    if result:
-        result += "\n\nTo build a project, use `get_project_schemes` to see available build schemes (including the active one), then call `build_project`. Use `get_active_run_destination` to see the currently selected run target."
+    result = {
+        "result": "success_with_warnings" if warnings else "success",
+        "guidance": (
+            "For any project, `get_project_schemes(project_path='...')` lists all available "
+            "schemes (opens the project in Xcode if not already open). "
+            "`get_active_run_destination(project_path='...')` reports the currently selected run target."
+        ),
+        "content": {
+            "currently_open": currently_open,
+            "recent": recent_entries,
+            "other_projects": other_entries,
+        },
+    }
+    if warnings:
+        result["warnings"] = warnings
 
-    if search_warnings:
-        warn_block = "\n".join(f"- {w}" for w in search_warnings)
-        prefix = "\n\n" if result else ""
-        result += (
-            f"{prefix}[search warnings — results may be incomplete]\n{warn_block}"
-        )
-
-    return result
+    return json.dumps(result, indent=2)

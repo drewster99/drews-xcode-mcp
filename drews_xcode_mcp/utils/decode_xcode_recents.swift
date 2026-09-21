@@ -1,18 +1,21 @@
 #!/usr/bin/swift
 import Foundation
 
-/// Decode Xcode recent documents and get currently open projects
-/// Reads bookmark data and outputs paths to .xcodeproj and .xcworkspace files
-/// Also queries Xcode for currently open projects
+/// Decode Xcode recent documents and get currently open projects.
+/// Reads bookmark data for recents and queries Xcode's open workspace documents
+/// via AppleScript. Outputs paths to .xcodeproj and .xcworkspace files, one per
+/// line, prefixed "OPEN:" for currently open projects and "RECENT:" for
+/// projects from Xcode's recents list that are not currently open.
 /// Usage: swift decode_xcode_recents.swift [--include-open]
 
 let arguments = CommandLine.arguments.dropFirst()
 let includeOpen = arguments.contains("--include-open")
 
-var allPaths: Set<String> = []
+var recentPaths: Set<String> = []
 
 // Try .sfl4 first (newer macOS), then .sfl3 (older macOS)
-func decodePlistRecents() {
+func decodePlistRecents() -> Set<String> {
+    var paths: Set<String> = []
     let basePath = "~/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/com.apple.dt.xcode"
 
     for ext in ["sfl4", "sfl3"] {
@@ -38,7 +41,7 @@ func decodePlistRecents() {
                     // Only include .xcodeproj and .xcworkspace files
                     if (path.hasSuffix(".xcodeproj") || path.hasSuffix(".xcworkspace")) &&
                        FileManager.default.fileExists(atPath: path) {
-                        allPaths.insert(path)
+                        paths.insert(path)
                     }
                 } catch {
                     // Not a valid bookmark or file doesn't exist, skip
@@ -49,24 +52,24 @@ func decodePlistRecents() {
         // Found the file, don't try the other format
         break
     }
+
+    return paths
 }
 
-// Get currently open projects via AppleScript
+// Get currently open projects via AppleScript. `workspace documents` (plural,
+// top-level) is the correct vocabulary -- Xcode's dictionary has no `open
+// documents` property, and includes .xcfilescontainer entries alongside real
+// projects, so filter to just .xcodeproj/.xcworkspace paths.
 func getOpenProjects() -> Set<String> {
     var openPaths: Set<String> = []
 
     let script = """
     tell application "Xcode"
-        set openProjects to {}
-        repeat with doc in open documents
-            try
-                set docPath to path of doc
-                if docPath ends with ".xcodeproj" or docPath ends with ".xcworkspace" then
-                    copy docPath to the end of openProjects
-                end if
-            end try
-        end repeat
-        return openProjects
+        set docPaths to path of workspace documents
+        set AppleScript's text item delimiters to "\\n"
+        set output to docPaths as string
+        set AppleScript's text item delimiters to ""
+        return output
     end tell
     """
 
@@ -85,10 +88,10 @@ func getOpenProjects() -> Set<String> {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
            !output.isEmpty {
-            // AppleScript returns items separated by commas or newlines
-            let paths = output.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+            let paths = output.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }
             for path in paths {
-                if !path.isEmpty && FileManager.default.fileExists(atPath: path) {
+                if (path.hasSuffix(".xcodeproj") || path.hasSuffix(".xcworkspace")) &&
+                   FileManager.default.fileExists(atPath: path) {
                     openPaths.insert(path)
                 }
             }
@@ -100,17 +103,17 @@ func getOpenProjects() -> Set<String> {
     return openPaths
 }
 
+recentPaths = decodePlistRecents()
 
-// Decode recent projects from plist
-decodePlistRecents()
-
-// Add currently open projects if requested
+var openPaths: Set<String> = []
 if includeOpen {
-    let openProjects = getOpenProjects()
-    allPaths.formUnion(openProjects)
+    openPaths = getOpenProjects()
 }
 
-// Output paths one per line, sorted
-for path in allPaths.sorted() {
-    print(path)
+// Recents that are also open are reported only under OPEN.
+for path in openPaths.sorted() {
+    print("OPEN:\(path)")
+}
+for path in recentPaths.subtracting(openPaths).sorted() {
+    print("RECENT:\(path)")
 }

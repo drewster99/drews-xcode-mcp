@@ -472,6 +472,45 @@ def resolve_active_destination_id(project_path: str, scheme: Optional[str] = Non
         return None
 
 
+def lookup_simulator_info(udid: str) -> Tuple[str, str]:
+    """
+    Look up a simulator name and OS version by UDID using xcrun simctl.
+    Returns (name, os_version) or ("", "").
+    """
+    try:
+        result = subprocess.run(
+            ['xcrun', 'simctl', 'list', 'devices', udid],
+            capture_output=True, text=True, timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"warn: simctl list devices timed out for {udid}", file=sys.stderr)
+        return ("", "")
+    except FileNotFoundError:
+        print("warn: `xcrun` binary not found on PATH", file=sys.stderr)
+        return ("", "")
+
+    if result.returncode != 0:
+        print(
+            f"warn: simctl list devices exited {result.returncode}: "
+            f"{result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return ("", "")
+
+    current_os = ""
+    for line in result.stdout.split('\n'):
+        stripped = line.strip()
+        # Track OS version from section headers like "-- iOS 26.4 --"
+        if stripped.startswith('-- ') and stripped.endswith(' --'):
+            current_os = stripped[3:-3]  # e.g. "iOS 26.4"
+        elif udid in stripped:
+            paren_idx = stripped.find('(')
+            if paren_idx > 0:
+                name = stripped[:paren_idx].strip()
+                return (name, current_os)
+    return ("", "")
+
+
 def _destination_test_rank(dest: Dict) -> int:
     """
     Rank a compatible destination by how well it supports building and loading a

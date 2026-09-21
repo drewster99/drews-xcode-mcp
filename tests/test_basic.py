@@ -18,17 +18,27 @@ class BasicTests(XcodeMCPTestRunner):
 
     def test_get_xcode_projects_empty(self):
         """Test finding projects in empty directory."""
+        import json
+
         empty_dir = self.working_dir / "empty"
         empty_dir.mkdir(exist_ok=True)
 
         result = self.run_mcp_tool("get_xcode_projects", search_path=str(empty_dir))
         self.assert_success(result)
 
-        # Should return empty string for no projects
-        assert result["result"] == "", f"Expected empty result, got: {result['result']}"
+        # Should return JSON with all three groups empty. currently_open and
+        # recent are also constrained to search_path, so an empty directory
+        # yields nothing in any of them.
+        payload = json.loads(result["result"])
+        content = payload["content"]
+        assert content["currently_open"] == [], f"Expected no open projects, got: {content['currently_open']}"
+        assert content["recent"] == [], f"Expected no recent projects, got: {content['recent']}"
+        assert content["other_projects"] == [], f"Expected no other projects, got: {content['other_projects']}"
 
     def test_get_xcode_projects_with_projects(self):
         """Test finding projects in directory with projects."""
+        import json
+
         # Copy test projects. These are searched for via Spotlight, so wait for
         # the copied bundles to be indexed before querying.
         simple_app_path = self.copy_project("SimpleApp", index_for_discovery=True)
@@ -38,12 +48,20 @@ class BasicTests(XcodeMCPTestRunner):
         result = self.run_mcp_tool("get_xcode_projects", search_path=str(self.working_dir))
         self.assert_success(result)
 
-        # Should find both projects
-        projects = result["result"].split('\n') if result["result"] else []
-        assert len(projects) >= 2, f"Expected at least 2 projects, found {len(projects)}"
+        # A copied project can land in recent instead of other_projects if
+        # Xcode already has it in its recent-documents list (e.g. from earlier
+        # test/dev runs against the same template), so check across all three
+        # groups rather than assuming other_projects specifically.
+        payload = json.loads(result["result"])
+        content = payload["content"]
+        all_paths = (
+            [e["project"] for e in content["currently_open"]]
+            + [e["project"] for e in content["recent"]]
+            + [e["project"] for e in content["other_projects"]]
+        )
+        assert len(all_paths) >= 2, f"Expected at least 2 projects, found {len(all_paths)}"
 
-        # Check that both projects are found
-        project_names = [Path(p).name for p in projects]
+        project_names = [Path(p).name for p in all_paths]
         assert "SimpleApp.xcodeproj" in project_names, "SimpleApp.xcodeproj not found"
         assert "ConsoleApp.xcodeproj" in project_names, "ConsoleApp.xcodeproj not found"
 
@@ -124,9 +142,8 @@ class BasicTests(XcodeMCPTestRunner):
         result = self.run_mcp_tool("get_xcode_projects")
         self.assert_success(result)
 
-        # Should find the SimpleApp project
-        if result["result"]:
-            self.assert_contains(result["result"], "SimpleApp.xcodeproj")
+        # Should find the SimpleApp project somewhere in the JSON payload
+        self.assert_contains(result["result"], "SimpleApp.xcodeproj")
 
     def test_path_normalization(self):
         """Test that paths are normalized correctly."""
