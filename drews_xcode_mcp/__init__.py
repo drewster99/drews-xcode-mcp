@@ -1,6 +1,6 @@
 """Xcode MCP Server - Model Context Protocol server for Xcode integration"""
 
-__version__ = "1.3.28"
+__version__ = "1.3.29"
 
 
 def main():
