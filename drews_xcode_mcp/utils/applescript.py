@@ -109,6 +109,9 @@ def build_open_and_wait_applescript(escaped_path: str, escaped_scheme: Optional[
     close the `tell` block — callers append their action statements and a final
     `end tell`.
 
+    If the project is already open, it will be brought to focus rather than
+    re-opened, avoiding unnecessary delays.
+
     Args:
         escaped_path: Project path, already passed through escape_applescript_string.
         escaped_scheme: Optional scheme name, already escaped. When provided,
@@ -123,8 +126,12 @@ def build_open_and_wait_applescript(escaped_path: str, escaped_scheme: Optional[
         f'set projectPath to "{escaped_path}"\n'
         f'{scheme_decl}'
         f'tell application "Xcode"\n'
-        f'    open projectPath\n'
-        f'    set workspaceDoc to first workspace document whose path is projectPath\n'
+        f'    -- Check if already open, avoid re-opening\n'
+        f'    set workspaceDoc to (first workspace document whose path is projectPath)\n'
+        f'    if workspaceDoc is missing value then\n'
+        f'        open projectPath\n'
+        f'        set workspaceDoc to first workspace document whose path is projectPath\n'
+        f'    end if\n'
         f'\n'
         f'    repeat {WORKSPACE_LOAD_REPEATS} times\n'
         f'        if loaded of workspaceDoc is true then exit repeat\n'
