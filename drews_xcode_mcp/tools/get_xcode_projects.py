@@ -23,13 +23,16 @@ def register_created_project(xcodeproj_path: str):
     _recently_created_projects.append(xcodeproj_path)
 
 
-def _get_recent_xcode_projects() -> list[str]:
+def _get_recent_xcode_projects(include_open: bool = False) -> tuple[list[str], dict]:
     """
     Get recently opened Xcode projects by decoding macOS shared file list.
 
+    Args:
+        include_open: If True, also include currently open projects from Xcode
+
     Returns:
-        List of absolute paths to recently opened .xcodeproj and .xcworkspace files.
-        Returns empty list if unable to decode recents.
+        Tuple of (list of paths, metadata dict with activeScheme/activeRunDestination if available)
+        Returns (empty list, {}) if unable to decode recents.
     """
     try:
         # Get path to Swift decoder script
@@ -39,20 +42,28 @@ def _get_recent_xcode_projects() -> list[str]:
 
         if not os.path.exists(swift_script):
             print(f"Warning: Swift decoder not found at {swift_script}", file=sys.stderr)
-            return []
+            return [], {}
+
+        # Build arguments for Swift script
+        args = ['swift', swift_script]
+        if include_open:
+            args.append('--include-open')
 
         # Run Swift script to decode bookmark data
-        result = subprocess.run(['swift', swift_script],
+        result = subprocess.run(args,
                               capture_output=True, text=True, timeout=5)
 
-        if result.returncode == 0 and result.stdout.strip():
-            paths = result.stdout.strip().split('\n')
-            return [p for p in paths if p and os.path.exists(p)]
+        if result.returncode != 0 or not result.stdout.strip():
+            return [], {}
 
-        return []
+        # Parse output: paths
+        lines = result.stdout.strip().split('\n')
+        paths = [line for line in lines if line and os.path.exists(line)]
+
+        return paths, {}
     except Exception as e:
         print(f"Warning: Failed to get recent projects: {e}", file=sys.stderr)
-        return []
+        return [], {}
 
 
 def _filter_project_results(paths: list[str], search_paths: list[str] = None, max_depth: int = None, regex_filter: str = None) -> list[str]:
@@ -291,7 +302,7 @@ def get_xcode_projects(
     # Get recent projects if requested
     recent_projects = []
     if include_recents:
-        recent_projects = _get_recent_xcode_projects()
+        recent_projects, _ = _get_recent_xcode_projects(include_open=True)
         # Filter recents with same criteria
         recent_projects = _filter_project_results(
             recent_projects,
@@ -342,7 +353,7 @@ def get_xcode_projects(
 
     result = '\n'.join(unique_results) if unique_results else ""
     if result:
-        result += "\n\nTo build a project, use `get_project_schemes` to see available build schemes, then call `build_project`."
+        result += "\n\nTo build a project, use `get_project_schemes` to see available build schemes (including the active one), then call `build_project`. Use `get_active_run_destination` to see the currently selected run target."
 
     if search_warnings:
         warn_block = "\n".join(f"- {w}" for w in search_warnings)
