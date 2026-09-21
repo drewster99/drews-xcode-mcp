@@ -60,10 +60,18 @@ func decodePlistRecents() -> Set<String> {
 // top-level) is the correct vocabulary -- Xcode's dictionary has no `open
 // documents` property, and includes .xcfilescontainer entries alongside real
 // projects, so filter to just .xcodeproj/.xcworkspace paths.
+//
+// Guarded by an `is running` check first: a bare `tell application "Xcode"`
+// launches Xcode via Launch Services if it isn't already running, which is
+// not an acceptable side effect for what is otherwise a read-only listing.
 func getOpenProjects() -> Set<String> {
     var openPaths: Set<String> = []
 
     let script = """
+    tell application "System Events"
+        set xcodeRunning to (name of processes) contains "Xcode"
+    end tell
+    if not xcodeRunning then return ""
     tell application "Xcode"
         set docPaths to path of workspace documents
         set AppleScript's text item delimiters to "\\n"
