@@ -159,28 +159,119 @@ def parse_destination_line(line: str) -> Optional[Dict]:
     return result
 
 
-def list_destinations(project_path: str, scheme: str, timeout: int = 30) -> List[Dict]:
+SHOW_DESTINATIONS_TIMEOUT_SECONDS = 30
+
+# `xcodebuild -showdestinations` does not wait for its asynchronous simulator
+# discovery before printing, so a run can list no simulators at all -- most often
+# the first run after about a minute of idle. Querying simctl first prevents
+# nearly all of these; re-running recovers the rest, within 1-3 re-runs 0.5s apart
+# in testing. See "xcodebuild -showdestinations Omits Simulators" in TODO.md.
+SIMULATOR_OMISSION_ATTEMPTS = 6
+SIMULATOR_OMISSION_RETRY_DELAY_SECONDS = 0.5
+
+
+def _run_show_destinations(project_path: str, scheme: str) -> List[Dict]:
+    """
+    Run `xcodebuild -showdestinations` once and return the parsed destinations,
+    minus generic placeholders. Raises XCodeMCPError if xcodebuild fails or times out.
+    """
+    try:
+        result = subprocess.run(
+            ['xcodebuild', '-showdestinations', project_flag_for(project_path),
+             project_path, '-scheme', scheme],
+            capture_output=True, text=True, timeout=SHOW_DESTINATIONS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise XCodeMCPError(
+            f"xcodebuild -showdestinations timed out after {SHOW_DESTINATIONS_TIMEOUT_SECONDS} seconds"
+        )
+    except OSError as e:
+        raise XCodeMCPError(f"Failed to run xcodebuild: {e}")
+
+    if result.returncode != 0:
+        for err_line in result.stderr.split('\n'):
+            if 'error:' in err_line:
+                raise XCodeMCPError(err_line.strip())
+        raise XCodeMCPError(f"xcodebuild -showdestinations failed for scheme '{scheme}'")
+
+    destinations = []
+    for line in (result.stdout + result.stderr).split('\n'):
+        parsed = parse_destination_line(line)
+        if parsed and 'placeholder' not in parsed.get('id', ''):
+            destinations.append(parsed)
+    return destinations
+
+
+def count_available_simulators() -> int:
+    """
+    Return how many available simulator devices CoreSimulator reports, via
+    `xcrun simctl list devices available -j`. Raises XCodeMCPError on failure.
+    """
+    command = ['xcrun', 'simctl', 'list', 'devices', 'available', '-j']
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        raise XCodeMCPError(f"`{' '.join(command)}` timed out after 15 seconds")
+    except OSError as e:
+        raise XCodeMCPError(f"Failed to run `{' '.join(command)}`: {e}")
+    if result.returncode != 0:
+        raise XCodeMCPError(f"`{' '.join(command)}` failed: {result.stderr.strip()}")
+    try:
+        devices_by_runtime = json.loads(result.stdout)['devices']
+    except (json.JSONDecodeError, KeyError) as e:
+        raise XCodeMCPError(f"Unexpected `{' '.join(command)}` output: {e}")
+    return sum(len(devices) for devices in devices_by_runtime.values())
+
+
+def lists_any_simulator(destinations: List[Dict]) -> bool:
+    """
+    Whether any destination is a simulator, compatible with the scheme or not.
+
+    xcodebuild lists every available simulator, marking the ones the scheme can't
+    use with an 'error', so a list with none while simulators exist means
+    xcodebuild omitted them.
+    """
+    return any(d.get('platform', '').endswith(' Simulator') for d in destinations)
+
+
+def list_destinations(project_path: str, scheme: str) -> List[Dict]:
     """
     Return parsed destinations for a scheme via `xcodebuild -showdestinations`.
 
     Generic placeholder destinations (those whose id contains 'placeholder')
     are dropped. Ineligible destinations are kept, each with an 'error' field.
-    Raises subprocess.TimeoutExpired if xcodebuild does not respond in time.
-    """
-    result = subprocess.run(
-        ['xcodebuild', '-showdestinations', project_flag_for(project_path),
-         project_path, '-scheme', scheme],
-        capture_output=True, text=True, timeout=timeout,
-    )
-    output = result.stdout + result.stderr
 
-    destinations = []
-    for line in output.split('\n'):
-        line = line.strip()
-        if line.startswith('{') and line.endswith('}'):
-            parsed = parse_destination_line(line)
-            if parsed and 'placeholder' not in parsed.get('id', ''):
-                destinations.append(parsed)
+    simctl is queried first: it gives the number of simulators xcodebuild should
+    list, and the query itself makes xcodebuild's omission of them far less
+    likely. When xcodebuild still lists none, it is re-run (see
+    SIMULATOR_OMISSION_ATTEMPTS). Raises XCodeMCPError if simctl or xcodebuild
+    fails or times out, or if the simulators are still missing after every attempt.
+    """
+    available_simulators = count_available_simulators()
+
+    destinations = _run_show_destinations(project_path, scheme)
+    attempts = 1
+
+    def simulators_omitted() -> bool:
+        return available_simulators > 0 and not lists_any_simulator(destinations)
+
+    while simulators_omitted() and attempts < SIMULATOR_OMISSION_ATTEMPTS:
+        time.sleep(SIMULATOR_OMISSION_RETRY_DELAY_SECONDS)
+        destinations = _run_show_destinations(project_path, scheme)
+        attempts += 1
+
+    if simulators_omitted():
+        raise XCodeMCPError(
+            f"xcodebuild -showdestinations listed no simulators in {attempts} attempts, "
+            f"although simctl reports {available_simulators} available. xcodebuild "
+            "sometimes prints destinations before its simulator discovery finishes; "
+            "try again."
+        )
+    if attempts > 1:
+        print(
+            f"info: xcodebuild -showdestinations omitted simulators; listed them on attempt {attempts}",
+            file=sys.stderr,
+        )
     return destinations
 
 
@@ -573,12 +664,6 @@ def _destination_test_rank(dest: Dict) -> int:
     return 2
 
 
-# `-showdestinations` can omit a scheme's simulators transiently; retry a few
-# times before settling for a rank-2 "trap" destination.
-_RESOLVE_DESTINATION_ATTEMPTS = 5
-_RESOLVE_DESTINATION_RETRY_DELAY = 2.0
-
-
 def resolve_buildable_destination(project_path: str, scheme: str) -> Optional[str]:
     """
     Return a `-destination` argument value (e.g. "id=00006040-...") for the
@@ -595,46 +680,27 @@ def resolve_buildable_destination(project_path: str, scheme: str) -> Optional[st
     trap for iOS apps and the wrong-platform (iOS simulator) pick for a
     multiplatform macOS library.
 
-    `-showdestinations` intermittently omits a scheme's simulators while
-    CoreSimulator is busy (e.g. right after a prior build-for-testing). If the
-    only compatible destinations are rank-2 "traps" (physical devices and the
-    "Designed for iPad" Mac), this retries to give the simulators a chance to
-    reappear — otherwise enumeration would land on a destination where the iOS
-    test bundle can't load.
+    list_destinations() re-queries when xcodebuild omits the simulators, so a
+    rank-2 "trap" (a physical device or the "Designed for iPad" Mac, where an iOS
+    test bundle can't load) is chosen only when no simulator is compatible.
 
-    Returns None if no compatible destination can be determined (e.g. xcodebuild
-    timed out, or the scheme has no eligible destinations).
+    Returns None if the scheme has no compatible destination. Raises
+    XCodeMCPError if the destinations cannot be listed.
     """
-    # The active destination doesn't change between retries, so resolve it once.
+    destinations = list_destinations(project_path, scheme)
+    compatible = [dest for dest in destinations if 'error' not in dest]
+    if not compatible:
+        return None
+
+    # Prefer the active run destination when it's compatible AND a safe build
+    # target. A device (rank 2) is skipped so enumeration doesn't fail on
+    # code-signing; we fall back to a simulator of the same platform instead.
     active_udid = resolve_active_destination_id(project_path, scheme)
+    if active_udid:
+        active_entries = [d for d in compatible if d.get('id') == active_udid]
+        if active_entries and min(_destination_test_rank(d) for d in active_entries) < 2:
+            return f"id={active_udid}"
 
-    best = None
-    for attempt in range(_RESOLVE_DESTINATION_ATTEMPTS):
-        try:
-            destinations = list_destinations(project_path, scheme)
-        except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError):
-            return None
-
-        compatible = [dest for dest in destinations if 'error' not in dest]
-        if not compatible:
-            return None
-
-        # Prefer the active run destination when it's compatible AND a safe build
-        # target. A device (rank 2) is skipped so enumeration doesn't fail on
-        # code-signing; we fall back to a simulator of the same platform instead.
-        if active_udid:
-            active_entries = [d for d in compatible if d.get('id') == active_udid]
-            if active_entries and min(_destination_test_rank(d) for d in active_entries) < 2:
-                return f"id={active_udid}"
-
-        # min() is stable, so this keeps xcodebuild's order within a rank.
-        best = min(compatible, key=_destination_test_rank)
-        if _destination_test_rank(best) < 2:
-            return f"id={best['id']}"
-
-        # Only rank-2 traps are listed — the simulators are probably just not
-        # enumerated yet. Wait and re-query before settling for the trap.
-        if attempt < _RESOLVE_DESTINATION_ATTEMPTS - 1:
-            time.sleep(_RESOLVE_DESTINATION_RETRY_DELAY)
-
-    return f"id={best['id']}" if best else None
+    # min() is stable, so this keeps xcodebuild's order within a rank.
+    best = min(compatible, key=_destination_test_rank)
+    return f"id={best['id']}"

@@ -302,6 +302,56 @@ them, and the old console section never included them.
   message/subsystem/category are used today; timestamps in particular could
   improve the runtime output.
 
+### xcodebuild -showdestinations Omits Simulators
+
+**Symptom**: `xcodebuild -showdestinations` sometimes lists no simulators at all —
+neither compatible ones nor the ineligible ones it normally marks with `error:` —
+and exits 0. `list_run_destinations` then showed a list without them, and
+`resolve_buildable_destination` fell into the "My Mac (Designed for iPad)" trap.
+Earlier code attributed this to "CoreSimulator being busy"; that was not the cause.
+
+**Cause** (Xcode 27.2, macOS 27.2): xcodebuild starts simulator discovery
+asynchronously and prints destinations without waiting for it. In the unified log,
+a run that listed simulators opened its CoreSimulatorService device connections
+~50 ms after launch, before CoreDevice plugin check-in finished; a run that missed
+them opened those connections ~135 ms in, after everything else, and exited 3 ms
+later without ever connecting to `SimLaunchHost`. `CoreSimulatorService`,
+`simdiskimaged` and `CoreDeviceService` did not restart between runs, so this is not
+a daemon cold start. `~/Library/Logs/CoreSimulator/CoreSimulator.log` shows the
+split directly: every run logs `Unable to discover any Simulator runtimes` (even
+successful ones — it is noise), but only runs that listed simulators go on to log
+`Connecting to com.apple.CoreSimulator.SimLaunchHost-arm64`.
+
+**What makes it likely**: idle time. Measured on one project with 10 available
+simulators, each trial preceded by 60 s with no xcodebuild/simctl activity:
+
+| variant | trials | missed simulators |
+|---|---|---|
+| plain `-showdestinations` | 12 | 7 |
+| `-destination-timeout 10` | 4 | 2 |
+| `xcrun simctl list devices` first | 12 | 0 |
+
+Back-to-back runs almost never miss. After a miss, re-running 0.5 s apart recovered
+within 1–3 re-runs. `-destination-timeout` does not help — it applies only to
+resolving `-destination`.
+
+**Current handling** (`utils/xcodebuild_query.list_destinations`, the only caller of
+`-showdestinations`): query `simctl list devices available -j` first (~0.1 s), which
+both prevents most misses and gives the count of simulators that should appear;
+if xcodebuild then lists none while simctl reports some, re-run up to 6 attempts,
+0.5 s apart, and raise if they never appear.
+
+**Open questions**:
+- Why the simctl query helps is not established; it may warm CoreSimulatorService
+  state that xcodebuild's discovery reads. It reduces the race, it cannot close it,
+  hence the retry.
+- The check assumes xcodebuild lists every available simulator for any scheme
+  (verified: a macOS-only scheme listed all 10 as ineligible). A machine whose only
+  simulators are of a platform xcodebuild omits for some scheme would get a false
+  "omitted" error.
+- Re-test on newer Xcode releases; remove the workaround if xcodebuild starts
+  waiting for discovery.
+
 ### In-Flight Build Log Retrieval
 
 **Idea**: expose the `build log` of a scheme action that has *not* finished, so a

@@ -3,7 +3,6 @@
 
 import json
 import os
-import subprocess
 from typing import Optional
 
 from drews_xcode_mcp.server import mcp, TOOL_READONLY
@@ -16,10 +15,9 @@ from drews_xcode_mcp.utils.applescript import (
     show_result_notification,
 )
 from drews_xcode_mcp.utils.xcodebuild_query import (
-    project_flag_for,
     get_first_scheme,
+    list_destinations,
     omit_non_distinguishing_architectures,
-    parse_destination_line,
     select_destinations_for_platform,
 )
 
@@ -73,9 +71,6 @@ def list_run_destinations(
     normalized_path = validate_and_normalize_project_path(project_path, "Listing destinations for")
     project_name = os.path.basename(normalized_path)
 
-    # Determine the xcodebuild flag based on project type
-    project_flag = project_flag_for(normalized_path)
-
     # Get scheme name if not provided
     if not scheme:
         scheme = get_first_scheme(normalized_path)
@@ -87,33 +82,7 @@ def list_run_destinations(
 
     show_notification("Listing Destinations", project_name, f"Scheme: {scheme}")
 
-    try:
-        result = subprocess.run(
-            ['xcodebuild', '-showdestinations', project_flag, normalized_path, '-scheme', scheme],
-            capture_output=True, text=True, timeout=30,
-        )
-        output = result.stdout + result.stderr
-        if result.returncode != 0:
-            # Look for a clear error message from xcodebuild
-            for err_line in result.stderr.split('\n'):
-                if 'error:' in err_line:
-                    raise XCodeMCPError(err_line.strip())
-            raise XCodeMCPError(f"xcodebuild failed for scheme '{scheme}'")
-    except subprocess.TimeoutExpired:
-        raise XCodeMCPError("xcodebuild -showdestinations timed out after 30 seconds")
-    except XCodeMCPError:
-        raise
-    except Exception as e:
-        raise XCodeMCPError(f"Failed to run xcodebuild: {e}")
-
-    # Parse destination lines, skipping generic placeholder destinations
-    destinations = []
-    for line in output.split('\n'):
-        line = line.strip()
-        if line.startswith('{') and line.endswith('}'):
-            parsed = parse_destination_line(line)
-            if parsed and 'placeholder' not in parsed.get('id', ''):
-                destinations.append(parsed)
+    destinations = list_destinations(normalized_path, scheme)
 
     # Filter by platform before dropping incompatible destinations, so a platform
     # the scheme can't run on yields [] rather than a "no such platform" error.
