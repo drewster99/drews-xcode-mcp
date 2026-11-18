@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from drews_xcode_mcp.exceptions import XCodeMCPError
+from drews_xcode_mcp.exceptions import InvalidParameterError, XCodeMCPError
 
 
 def project_flag_for(project_path: str) -> str:
@@ -182,6 +182,47 @@ def list_destinations(project_path: str, scheme: str, timeout: int = 30) -> List
             if parsed and 'placeholder' not in parsed.get('id', ''):
                 destinations.append(parsed)
     return destinations
+
+
+def select_destinations_for_platform(destinations: List[Dict], platform: str) -> List[Dict]:
+    """
+    Return the destinations whose 'platform' equals `platform` exactly.
+
+    Raises InvalidParameterError when no destination reports that platform, naming
+    the platforms that were reported. An empty list would read to the caller as
+    "nothing available for that platform", hiding a misspelled or mis-cased name
+    (xcodebuild spells them e.g. "iOS Simulator", "macOS").
+    """
+    selected = [d for d in destinations if d.get('platform') == platform]
+    if not selected:
+        reported = sorted({d['platform'] for d in destinations if 'platform' in d})
+        raise InvalidParameterError(
+            f"No destination has platform '{platform}'. "
+            f"Platforms reported: {', '.join(reported) if reported else 'none'}"
+        )
+    return selected
+
+
+def omit_non_distinguishing_architectures(destinations: List[Dict]) -> List[Dict]:
+    """
+    Return copies of the destinations with 'arch' kept only where it distinguishes
+    destinations sharing an 'id'.
+
+    The 'id' is what callers act on, and nearly every id has a single architecture,
+    so 'arch' is usually noise. It matters only when one device is listed under
+    several architectures (e.g. a Mac offered natively and under Rosetta).
+    """
+    architectures_by_id: Dict[str, set] = {}
+    for destination in destinations:
+        architectures_by_id.setdefault(destination['id'], set()).add(destination.get('arch'))
+
+    trimmed = []
+    for destination in destinations:
+        copy = dict(destination)
+        if len(architectures_by_id[destination['id']]) == 1:
+            copy.pop('arch', None)
+        trimmed.append(copy)
+    return trimmed
 
 
 # Decoding runs `swift` on a helper script, which compiles it on each run.

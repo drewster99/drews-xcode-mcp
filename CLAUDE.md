@@ -103,6 +103,7 @@ python tests/test_build_log_parser.py  # xcactivitylog parsing regression tests
 python tests/test_run_guard.py         # Per-project run/test exclusivity guard
 python tests/test_manifest_wait.py     # LogStoreManifest UUID-diff wait regression tests
 python tests/test_xcresult_wait.py     # xcresult new-bundle selection tests
+python tests/test_run_destination_filtering.py  # list_run_destinations platform filter and arch trimming
 python tests/test_runner.py            # Test runner infrastructure (not a test suite)
 
 # Tests automatically:

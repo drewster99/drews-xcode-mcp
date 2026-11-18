@@ -18,7 +18,9 @@ from drews_xcode_mcp.utils.applescript import (
 from drews_xcode_mcp.utils.xcodebuild_query import (
     project_flag_for,
     get_first_scheme,
+    omit_non_distinguishing_architectures,
     parse_destination_line,
+    select_destinations_for_platform,
 )
 
 
@@ -28,6 +30,7 @@ from drews_xcode_mcp.utils.xcodebuild_query import (
 def list_run_destinations(
     project_path: str,
     scheme: Optional[str] = None,
+    platform: Optional[str] = None,
     include_incompatible_destinations: bool = False,
 ) -> str:
     """
@@ -40,6 +43,10 @@ def list_run_destinations(
     include_incompatible_destinations is True. Excluding them can drop dozens of
     simulator entries for a single-platform app.
 
+    'arch' is included only on destinations that share an 'id' with another
+    destination of a different architecture, since only then does it tell them
+    apart; otherwise it is omitted.
+
     Use the 'id' field from the results with set_run_destination to change
     which device Xcode builds and runs for.
 
@@ -47,6 +54,11 @@ def list_run_destinations(
         project_path: Path to an Xcode project (.xcodeproj) or workspace (.xcworkspace).
         scheme: Scheme name to list destinations for. If not provided, uses the
             first scheme found via xcodebuild.
+        platform: Return only destinations with exactly this platform, as
+            xcodebuild names it (e.g. "macOS", "iOS", "iOS Simulator",
+            "watchOS Simulator"). Case-sensitive; "iOS" does not match
+            "iOS Simulator". An error naming the reported platforms is raised
+            if none matches. If not provided, all platforms are returned.
         include_incompatible_destinations: If True, also include destinations
             whose platform is incompatible with the scheme (each with an 'error'
             field describing why). Defaults to False.
@@ -54,6 +66,9 @@ def list_run_destinations(
     Returns:
         JSON array of destinations, each with: name, platform, id, and optionally
         arch, OS, error, and variant fields.
+
+    Raises:
+        InvalidParameterError: If platform is given and no destination reports it.
     """
     normalized_path = validate_and_normalize_project_path(project_path, "Listing destinations for")
     project_name = os.path.basename(normalized_path)
@@ -91,21 +106,26 @@ def list_run_destinations(
     except Exception as e:
         raise XCodeMCPError(f"Failed to run xcodebuild: {e}")
 
-    # Parse destination lines
+    # Parse destination lines, skipping generic placeholder destinations
     destinations = []
     for line in output.split('\n'):
         line = line.strip()
         if line.startswith('{') and line.endswith('}'):
             parsed = parse_destination_line(line)
-            if parsed:
-                # Skip generic placeholder destinations
-                if 'placeholder' in parsed.get('id', ''):
-                    continue
-                # Drop platform-incompatible destinations (each flagged by an
-                # 'error' from xcodebuild) unless the caller asked for them.
-                if not include_incompatible_destinations and 'error' in parsed:
-                    continue
+            if parsed and 'placeholder' not in parsed.get('id', ''):
                 destinations.append(parsed)
+
+    # Filter by platform before dropping incompatible destinations, so a platform
+    # the scheme can't run on yields [] rather than a "no such platform" error.
+    if platform is not None:
+        destinations = select_destinations_for_platform(destinations, platform)
+
+    # Drop platform-incompatible destinations (each flagged by an 'error' from
+    # xcodebuild) unless the caller asked for them.
+    if not include_incompatible_destinations:
+        destinations = [d for d in destinations if 'error' not in d]
+
+    destinations = omit_non_distinguishing_architectures(destinations)
 
     if destinations:
         count = len(destinations)
